@@ -1,0 +1,124 @@
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    networks:
+      - default
+      - dokploy-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # Routing/HTTPS is managed in the Dokploy UI (Domains tab), NOT via compose
+    # Traefik labels — having both made Traefik see two services on one container
+    # ("cannot be linked automatically with multiple Services") and every route 502'd.
+    # Add a Dokploy domain: Host=${MINIO_DOMAIN}, Service=minio, Port=9000, HTTPS on.
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/formforge
+      "
+    restart: "no"
+
+  api:
+    build: .
+    image: formforge-api:local
+    depends_on:
+      minio:
+        condition: service_healthy
+    # Postgres is an EXTERNAL/production DB (not in this compose). Set POSTGRES_HOST to:
+    #  - the Dokploy database service's internal name (reachable via dokploy-network), or
+    #  - host.docker.internal for a DB on the Docker host (host-gateway mapping below), or
+    #  - the hostname of a managed/remote Postgres.
+    # `dokploy-network` lets the api reach a Dokploy-managed Postgres service.
+    networks:
+      - default
+      - dokploy-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Compose
+      ASPNETCORE_URLS: http://+:8080
+      # Connection strings point at the external/production Postgres (override appsettings.Compose.json).
+      ConnectionStrings__formforge: "Host=${POSTGRES_HOST};Port=${POSTGRES_PORT};Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}"
+      ConnectionStrings__formforge_preview: "Host=${POSTGRES_HOST};Port=${POSTGRES_PORT};Database=${POSTGRES_DB};Username=${PREVIEW_DB_USER};Password=${PREVIEW_DB_PASSWORD};Maximum Pool Size=5"
+      DatasetManager__PreviewRolePassword: ${PREVIEW_DB_PASSWORD}
+      MinIO__Endpoint: http://minio:9000
+      # Browser-reachable MinIO host used to SIGN presigned URLs (the API uploads via the
+      # internal endpoint above, but the browser fetches images/files from this one).
+      MinIO__PublicEndpoint: ${MINIO_PUBLIC_ENDPOINT}
+      MinIO__AccessKey: ${MINIO_ROOT_USER}
+      MinIO__SecretKey: ${MINIO_ROOT_PASSWORD}
+      # Allow that same MinIO host in the CSP img-src so presigned images render.
+      Security__MinioPresignedHost: ${MINIO_PUBLIC_ENDPOINT}
+      Cors__AllowedOrigins__0: https://${WEB_DOMAIN}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY}
+      # Session (access token) and refresh token lifetimes.
+      Jwt__AccessTokenTtlMinutes: ${ACCESS_TOKEN_TTL_MINUTES}
+      Jwt__RefreshTokenTtlDays: ${REFRESH_TOKEN_TTL_DAYS}
+      # Email (SMTP). Points at the Mailpit instance running on the Docker host
+      # (host.docker.internal:1025); an empty SMTP_HOST disables outbound email
+      # (the service logs a skip and returns).
+      Smtp__Host: ${SMTP_HOST}
+      Smtp__Port: ${SMTP_PORT}
+      Smtp__User: ${SMTP_USER}
+      Smtp__Pass: ${SMTP_PASS}
+      Smtp__From: ${SMTP_FROM}
+      Smtp__BaseUrl: ${SMTP_BASE_URL}
+    # No host port published: the api is reached only via the web/nginx proxy on the
+    # internal network (and Traefik). This keeps Security:ForwardedHeaders:TrustAllProxies
+    # safe — external clients cannot reach the api directly to spoof X-Forwarded-* headers.
+    expose:
+      - "8080"
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: formforge-web:local
+    depends_on:
+      - api
+    # `default` keeps web on the internal network so it can proxy /api -> api:8080;
+    # `dokploy-network` lets Traefik reach it for public HTTPS routing.
+    networks:
+      - default
+      - dokploy-network
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Routing/HTTPS is managed in the Dokploy UI (Domains tab), NOT via compose
+    # Traefik labels — see the note on the minio service. Add a Dokploy domain:
+    # Host=${WEB_DOMAIN} (akashbd.tech), Service=web, Port=80, HTTPS on, redirect on.
+
+volumes:
+  minio-data:
+
+networks:
+  # Dokploy's Traefik runs on this shared external network. Services that need
+  # public HTTPS routing (web, minio) join it in addition to the internal default.
+  dokploy-network:
+    external: true

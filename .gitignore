@@ -1,0 +1,51 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# Playwright (Story 7.4) — locally generated; CI uploads as artifact
+web/playwright-report/
+web/test-results/
+
+# TanStack Router auto-generated route tree
+web/src/routeTree.gen.ts
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor temp files
+.vscode/*
+!.vscode/extensions.json
+*.ntvs*
+*.njsproj
+*.sw?
+*.local
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+*.env.local
+.env.development.local
+.env.production.local
+
+# Aspire / dotnet-user-secrets state (handled by dotnet — do not commit)
+**/UserSecrets/

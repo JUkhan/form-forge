@@ -1,0 +1,87 @@
+# Story 7.4 AC-6 — three-job CI pipeline enforcing the accessibility gate.
+# After this file merges, the repo admin MUST add `test-e2e` (and ideally
+# `test-backend` + `test-frontend`) as required status checks under the main
+# branch protection rule. GitHub branch-protection cannot be configured from
+# a workflow file — it lives in repo Settings → Branches.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+      - run: dotnet test --no-build -c Release
+        env:
+          ConnectionStrings__formforge: "Host=localhost;Database=ff_test;Username=postgres;Password=postgres"
+
+  test-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # Vitest run — includes the axe-core component tests from Story 7.4 Task 4
+      # which enforce zero critical violations on DynamicComponent.
+      - run: npm test
+      - run: npm run lint
+      - run: npm run lint:i18n
+      - run: npm audit --audit-level=high
+
+  test-e2e:
+    runs-on: ubuntu-latest
+    needs: [test-frontend]
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # vite preview serves dist/, which must exist before Playwright starts the
+      # webServer (playwright.config.ts → webServer.command runs `vite preview`,
+      # not `vite build`).
+      - run: npx vite build
+      - run: npx playwright install --with-deps chromium
+      # Includes web/e2e/accessibility.spec.ts — the axe-core smoke audit that
+      # gates Story 7.4 AC-5 + AC-6.
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7

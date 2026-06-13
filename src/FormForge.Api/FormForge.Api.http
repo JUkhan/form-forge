@@ -1,0 +1,6 @@
+@Api_HostAddress = http://localhost:5429
+
+GET {{Api_HostAddress}}/
+Accept: text/plain
+
+###

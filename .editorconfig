@@ -1,0 +1,33 @@
+root = true
+
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{cs,csproj,props,targets,sln}]
+indent_size = 4
+
+[*.md]
+trim_trailing_whitespace = false
+
+# EF Core generates migration code with patterns that trip several analyzers:
+#  - CA1515: public migration classes (EF reflection contract)
+#  - CA1814: object[,] multidimensional arrays for InsertData
+#  - CA1861: column-name arrays passed inline at the call site
+# Suppress for the Migrations folder so generated code compiles cleanly.
+[src/FormForge.Api/Infrastructure/Persistence/Migrations/*.cs]
+dotnet_diagnostic.CA1515.severity = none
+dotnet_diagnostic.CA1814.severity = none
+dotnet_diagnostic.CA1861.severity = none
+
+# Test method names follow the Method_Scenario_Expected xUnit convention; CA1707 (underscores) is noise here.
+# CA1515 (internal types) is suppressed for fixtures + factories that xUnit must resolve via reflection.
+# CA2007 (ConfigureAwait) is unnecessary inside xUnit tests, which run on a thread-pool synchronization context.
+[src/FormForge.Api.Tests/**/*.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.CA1515.severity = none
+dotnet_diagnostic.CA2007.severity = none

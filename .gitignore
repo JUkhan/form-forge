@@ -49,3 +49,6 @@ Thumbs.db
 
 # Aspire / dotnet-user-secrets state (handled by dotnet — do not commit)
 **/UserSecrets/
+
+# Claude Code session data
+.claude/

@@ -1,0 +1,182 @@
+# generated: 2026-05-22
+# last_updated: 2026-06-04 (story 9-5 table-left-right-designation created — ready-for-dev)
+# project: tinnitus
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog -> in-progress: Automatically when first story is created (via create-story)
+#   - in-progress -> done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-05-22
+last_updated: 2026-06-05 (story 11-4-builder-mode-view-lifecycle-integration — done)
+project: tinnitus
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  # Epic 1: Foundation & Infrastructure
+  epic-1: in-progress
+  1-1-initial-project-scaffolding: done
+  1-2-aspire-apphost-orchestration: done
+  1-3-docker-compose-local-stack: done
+  1-4-auto-generated-openapi-spec-and-swagger-ui: done
+  1-5-structured-logging-with-correlation-ids: done
+  1-6-health-check-endpoints: done
+  epic-1-retrospective: optional
+
+  # Epic 2: Identity, Roles & Permissions
+  epic-2: in-progress
+  2-1-jwt-login: done
+  2-2-token-refresh: done
+  2-3-logout: done
+  2-4-role-crud: done
+  2-5-user-role-assignment: done
+  2-6-effective-permission-computation-and-server-side-endpoint-authorization: done
+  2-7-client-side-permission-hiding: done
+  2-8-admin-user-management-ui: done
+  2-9-admin-role-management-ui: done
+  2-10-welcome-email-on-user-creation: done
+  2-11-forgot-password-flow: done
+  2-12-authenticated-password-change: done
+  2-13-totp-mfa-enrolment: done
+  2-14-totp-mfa-verification-on-login: done
+  2-15-admin-mfa-reset: done
+  epic-2-retrospective: optional
+
+  # Epic 3: Component Schema Designer
+  epic-3: in-progress
+  3-1-port-and-refactor-designer-code: done
+  3-2-create-new-designer: done
+  3-3-design-canvas-interaction: done
+  3-4-configure-component-properties: done
+  3-5-designer-live-preview: done
+  3-6-save-designer-version: done
+  3-7-version-status-management: done
+  3-8-designer-library-page: done
+  3-9-dynamiccomponent-renderer-for-data-entry: done
+  3-10-keyboard-accessible-designer-dnd: done
+  3-11-declare-and-enforce-component-mode: done
+  epic-3-retrospective: done
+
+  # Epic 4: Menu Management
+  epic-4: in-progress
+  4-1-create-and-manage-top-level-menu-items: done
+  4-2-create-sub-menu-items: done
+  4-3-assign-icon-to-menu-item: done
+  4-4-assign-roles-to-menu-item: done
+  4-5-reorder-menu-items-via-drag-and-drop: done
+  4-6-activate-and-deactivate-menu-items: done
+  4-7-render-permission-filtered-navigation: done
+  epic-4-retrospective: optional
+
+  # Epic 5: Dynamic Table Provisioning
+  epic-5: in-progress
+  5-1-validate-designerid-as-a-safe-postgresql-identifier: done
+  5-2-bind-designer-version-to-menu-item: done
+  5-3-provision-new-table-from-designer-schema: done
+  5-4-evolve-schema-with-a-new-designer-version: done
+  5-5-provision-child-tables-for-repeater-components: done
+  5-6-admin-schema-drift-view: done
+  5-7-view-schema-audit-log: done
+  5-8-provisioning-recovery-on-restart: done
+  epic-5-retrospective: optional
+
+  # Epic 6: Generic CRUD Service & Data Entry
+  epic-6: in-progress
+  6-1-list-records-with-pagination-filtering-and-sorting: done
+  6-2-get-a-single-record-with-optional-children: done
+  6-3-create-a-new-record: done
+  6-4-update-a-record-partial: done
+  6-5-soft-delete-a-record: done
+  6-6-view-and-restore-soft-deleted-records: done
+  6-7-create-update-parent-and-child-records-in-one-transaction: done
+  6-8-view-crud-mutation-audit-log: done
+  6-9-dynamic-data-entry-view: done
+  6-10-paginated-filterable-sortable-record-list: done
+  6-11-explicit-ui-states-for-all-data-operations: done
+  epic-6-retrospective: optional
+
+  # Epic 7: UX Polish & Cross-Cutting Hardening
+  epic-7: in-progress
+  7-1-responsive-layout-with-collapsible-navigation: done
+  7-2-select-and-apply-a-theme: done
+  7-3-server-side-theme-persistence-and-no-flash-hydration: done
+  7-4-accessibility-compliance: done
+  7-5-dedicated-admin-settings-area: done
+  7-6-externalized-string-architecture: done
+  epic-7-retrospective: done
+
+  # NOTE: A post-Epic-7 out-of-band theming remediation was completed 2026-06-02
+  # (story file: 8-1-theme-token-system-remediation.md, status: done).
+  # This was NOT in epics.md; it is now superseded by the canonical Epics 8–11 below.
+
+  # Epic 8: Dataset Foundation & Custom Query Mode
+  epic-8: in-progress
+  8-1-create-custom-dataset-migration: done
+  8-2-seed-dataset-management-permission-and-enforce-server-side: done
+  8-3-dataset-name-validation-client-server: done
+  8-4-create-dataset: done
+  8-5-update-dataset-edit-and-rename: done
+  8-6-delete-dataset: done
+  8-7-list-and-get-datasets: done
+  8-8-custom-query-authoring-mode: done
+  8-9-dataset-audit-log: done
+  8-10-dataset-management-ui: done
+  epic-8-retrospective: optional
+
+  # Epic 9: Query Builder Canvas & Joins
+  epic-9: in-progress
+  9-1-table-palette-with-allowlisted-tables: done
+  9-2-multi-table-canvas: done
+  9-3-column-to-column-join-edge-creation: done
+  9-4-join-property-inspector: done
+  9-5-table-left-right-designation: done
+  epic-9-retrospective: optional
+
+  # Epic 10: Builder Config
+  epic-10: in-progress
+  10-1-per-table-column-selection: done
+  10-2-aggregate-function-and-custom-column-alias: done
+  10-3-add-case-column: done
+  10-4-add-calculated-column: done
+  10-5-filter-conditions-dialog: done
+  10-6-filter-condition-definition: done
+  10-7-nested-filter-groups: done
+  10-8-order-by-panel: done
+  epic-10-retrospective: optional
+
+  # Epic 11: SQL Generation, Preview & Builder View Sync
+  epic-11: in-progress
+  11-1-server-authoritative-sql-generation: done
+  11-2-builder-state-persistence-and-restore: done
+  11-3-query-preview-limit-10: done
+  11-4-builder-mode-view-lifecycle-integration: done
+  epic-11-retrospective: optional

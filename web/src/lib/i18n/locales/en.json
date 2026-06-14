@@ -8,7 +8,7 @@
     "catppuccinLatte": "Catppuccin Latte"
   },
   "app": {
-    "home": "Akash Agent"
+    "home": "Form Forge"
   },
   "auth": {
     "login": {
@@ -112,7 +112,7 @@
     }
   },
   "nav": {
-    "brandName": "Akash Agent",
+    "brandName": "Form Forge",
     "admin": "Admin",
     "settings": "Settings",
     "openMenu": "Open menu",

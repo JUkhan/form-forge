@@ -13,6 +13,7 @@ import {
   type TableColumn,
 } from '@/features/data-entry/useDesignerFieldKeys'
 import { downloadRecordExport, type ExportFormat } from '@/features/data-entry/exportApi'
+import { compileMapExpression, type CompiledMapExpression } from '@/features/data-entry/mapExpression'
 import { fetchDropdownOptions } from '@/features/data-entry/dropdownOptionsApi'
 import { useRestoreRecord } from '@/features/data-entry/useRestoreRecord'
 import { ApiError } from '@/lib/api/apiError'
@@ -484,6 +485,19 @@ export function RecordListPage({
   const canCreate = usePermission(designerId, 'canCreate')
   const schema = useDesignerFieldKeys(designerId)
 
+  // Precompile each Field column's map expression once (keyed by the column's
+  // dataKey), so the per-row cell render is a cheap function call rather than a
+  // recompile. Declared up here (before the early returns) to keep hook order stable.
+  const mapExpressions = useMemo(() => {
+    const m = new Map<string, CompiledMapExpression>()
+    for (const col of schema.columns) {
+      if (col.mapExpression) {
+        m.set(col.dataKey, compileMapExpression(col.mapExpression, col.accessorKey ?? col.dataKey))
+      }
+    }
+    return m
+  }, [schema.columns])
+
   // Viewing / restoring soft-deleted rows is a platform-admin-only capability —
   // mirrors the admin route guard's check (admin.tsx). Non-admins never see the
   // toggle, and a hand-crafted ?showDeleted=true in their URL has no effect
@@ -787,12 +801,19 @@ export function RecordListPage({
                           deleted && 'opacity-60',
                         )}
                       >
-                        {columns.map((col, i) => (
-                          <td key={col.dataKey} className={cn('px-3 py-2', cellMuted)}>
-                            {i === 0 && deletedBadge}
-                            {formatCell(row[col.dataKey])}
-                          </td>
-                        ))}
+                        {columns.map((col, i) => {
+                          // Field columns read the underlying fieldName via accessorKey
+                          // (their dataKey is a synthetic element id) and may map the value.
+                          const accessor = col.accessorKey ?? col.dataKey
+                          const compiled = mapExpressions.get(col.dataKey)
+                          const raw = row[accessor]
+                          return (
+                            <td key={col.dataKey} className={cn('px-3 py-2', cellMuted)}>
+                              {i === 0 && deletedBadge}
+                              {formatCell(compiled ? compiled(raw) : raw)}
+                            </td>
+                          )
+                        })}
                         <td className={cn('whitespace-nowrap px-3 py-2 text-muted-foreground', deleted && 'line-through text-muted-foreground')}>
                           {columns.length === 0 && deletedBadge}
                           {formatTimestamp(row.createdAt)}

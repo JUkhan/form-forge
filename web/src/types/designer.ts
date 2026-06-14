@@ -38,6 +38,14 @@ export interface DesignerElementProperties {
   showInTable?: boolean
   columnHeader?: string
   columnOrder?: number
+  // Field element (type "Repeater Field") — reusable display field.
+  // `mapExpression` is an optional JS expression that transforms the field's own
+  // value before display (e.g. `name.toUpperCase()`); see features/data-entry/mapExpression.ts.
+  // `isTableColumn` (default false) opts a top-level Field — one placed directly on a
+  // CRUD form, NOT inside a Repeater/TreeView — into the record-list table as a
+  // display-only column, reusing columnHeader/columnOrder above for its header + position.
+  mapExpression?: string
+  isTableColumn?: boolean
   // TreeView (extends Repeater) — a standalone self-referencing tree over the
   // selected node-template table (`rowDesignerId`). `pageSize` controls the
   // on-demand pagination per tree level. The CRUD flags gate the per-node

@@ -125,6 +125,10 @@ interface DesignerCanvasState {
   schemaId: string | null
   version: number | null
   displayName: string
+  // Per-version dataset binding (the CustomDataset id), or null when the
+  // component reads from its own provisioned table. Surfaced so the inspector can
+  // source a top-level Field's "Field name" options from the dataset's columns.
+  datasetId: string | null
   isDirty: boolean
   selectedElementId: string | null
   rootElement: DesignerElement | null
@@ -143,6 +147,7 @@ const INITIAL_STATE = {
   schemaId: null,
   version: null,
   displayName: 'Untitled Component',
+  datasetId: null,
   isDirty: false,
   selectedElementId: null,
   rootElement: null,
@@ -273,6 +278,7 @@ export const useDesignerCanvasStore = create<DesignerCanvasState>((set, get) => 
       schemaId: schema.designerId,
       version: schema.latestVersion,
       displayName: schema.displayName,
+      datasetId: schema.datasetId ?? null,
       rootElement: schema.rootElement,
       isDirty: false,
       selectedElementId: null,

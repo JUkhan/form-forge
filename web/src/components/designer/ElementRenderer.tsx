@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { fetchDropdownOptions } from '@/features/data-entry/dropdownOptionsApi'
+import { compileMapExpression } from '@/features/data-entry/mapExpression'
 import { fetchDatasetOptions } from '@/features/datasets/datasetApi'
 import { httpClient } from '@/features/auth/httpClient'
 import DatasetView from './DatasetView'
@@ -537,24 +538,42 @@ function TabsRenderer({
 
 function RepeaterFieldLeaf({
   element,
+  interactive,
   interactiveProps,
 }: {
   element: DesignerElement
+  interactive: boolean
   interactiveProps?: InteractiveFormProps
 }) {
   const p = element.properties
   const fieldName = typeof p.fieldName === 'string' ? p.fieldName.trim() : ''
   const styleClasses = typeof p.styleClasses === 'string' ? p.styleClasses : ''
   const inlineStyleRaw = typeof p.inlineStyle === 'string' ? p.inlineStyle : ''
+  const mapExpressionRaw = typeof p.mapExpression === 'string' ? p.mapExpression : ''
   // parseInlineStyle hand-walks the declaration string with paren/quote
   // tracking — expensive enough to warrant memoization across rows in a
   // Repeater table where N rows × M Field columns would otherwise re-parse
   // the same string on every parent render.
   const parsedInlineStyle = useMemo(() => parseInlineStyle(inlineStyleRaw), [inlineStyleRaw])
+  // Compile the optional map expression once per (expression, fieldName) — same
+  // memoization rationale as parseInlineStyle above (re-used across every row).
+  const mapValue = useMemo(
+    () => compileMapExpression(mapExpressionRaw, fieldName),
+    [mapExpressionRaw, fieldName],
+  )
+
+  // A top-level Field marked "Show as table column" is a record-list column, not a
+  // form field — render nothing in the live form. On the designer canvas
+  // (interactive === false) it stays visible so the author can still select and
+  // configure it. (Fields inside a Repeater never carry isTableColumn — the
+  // inspector only offers it for top-level Fields.)
+  if (interactive && p.isTableColumn === true) return null
 
   let display: string
   if (fieldName !== '' && interactiveProps) {
-    const raw = interactiveProps.formData[fieldName]
+    // Apply the author's map expression to the field's own value before coercion;
+    // compileMapExpression is identity when no expression is set and swallows errors.
+    const raw = mapValue(interactiveProps.formData[fieldName])
     if (raw === undefined || raw === null) display = ''
     else if (typeof raw === 'boolean') display = raw ? 'Yes' : 'No'
     else if (typeof raw === 'object') {
@@ -1010,7 +1029,7 @@ function LeafRenderer({
       )
     }
     case 'Repeater Field':
-      return <RepeaterFieldLeaf element={element} interactiveProps={interactiveProps} />
+      return <RepeaterFieldLeaf element={element} interactive={interactive} interactiveProps={interactiveProps} />
     case 'File':
       return (
         <FileFieldRenderer

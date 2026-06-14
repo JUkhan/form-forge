@@ -29,6 +29,7 @@
    - 4.17 [Component Properties Reference](#417-component-properties-reference)
    - 4.18 [TreeView Component](#418-treeview-component)
    - 4.19 [Single Record Component](#419-single-record-component)
+   - 4.20 [Binding a Dataset to a CRUD Designer Version](#420-binding-a-dataset-to-a-crud-designer-version)
 5. [Dataset Manager](#5-dataset-manager)
    - 5.1 [Viewing the Dataset List](#51-viewing-the-dataset-list)
    - 5.2 [Creating a Dataset](#52-creating-a-dataset)
@@ -390,7 +391,7 @@ The palette offers four categories of components.
 |---|---|
 | **Repeater** | Captures a one-to-many relationship — multiple rows of sub-data within one parent record (see [Section 4.15](#415-repeaters)) |
 | **TreeView** | Captures a self-referencing parent-child hierarchy — an unlimited-depth tree of records (see [Section 4.18](#418-treeview-component)) |
-| **Repeater Field** | A display-only child component placed inside a Repeater or TreeView; shows a single field value from the row template |
+| **Field** | A display-only component that shows a single field value. Can be placed inside a Repeater or TreeView row template, or placed directly on a CRUD form — where it can also surface as a derived column in the record list (see [Section 4.17](#417-component-properties-reference)) |
 
 ### 4.12 Conditional Visibility and Field Options
 
@@ -441,7 +442,7 @@ A **Repeater** captures a one-to-many relationship — a variable number of rows
 
 1. Add a **Repeater** to the canvas.
 2. In the inspector, point it at a **row-form designer** and **version** — a separate (usually small) designer that defines the fields of each row.
-3. To display a value from a row inside the repeater, add a **Repeater Field** and choose which row-form field it shows.
+3. To display a value from a row inside the repeater, add a **Field** and choose which row-form field it shows.
 
 At data-entry time, users can add and remove rows; each row collects the fields defined by the row-form designer.
 
@@ -669,13 +670,17 @@ Captures a one-to-many relationship — multiple rows of sub-data within one par
 | **Max Rows** | Maximum number of rows the user may add (blank = no limit) |
 | **Show Headers** | Whether column headers appear above the row list |
 
-#### Repeater Field
+#### Field
 
-A display-only component that belongs **inside** a Repeater or TreeView and shows one field value from the row template. It has no meaning outside of a Repeater or TreeView.
+A display-only component that shows one field value. It can be placed **inside** a Repeater or TreeView row template (where it reads from the row-form designer's fields), or placed **directly on a CRUD canvas** (where it reads from the canvas's own fields or from the canvas's bound dataset columns).
 
 | Property | Description |
 |---|---|
-| **Field Name** | The Field Key from the row-form designer whose value to display |
+| **Field Name** | The Field Key whose value to display. When inside a Repeater or TreeView, picks from the row-form designer's fields. When placed directly on a CRUD canvas, picks from the canvas's own field keys or — if the canvas has a dataset bound (see [Section 4.20](#420-binding-a-dataset-to-a-crud-designer-version)) — from the dataset's columns. |
+| **Map Expression** | An optional JavaScript expression that transforms the raw field value before display (e.g. `value.toUpperCase()` or `value * 1.1`). The expression receives the raw value as `value` and must return the transformed result. Leave blank to display the value as-is. |
+| **Is Table Column** | When on, this Field appears as a display-only column in the CRUD record list. The column renders `mapExpression(row[fieldName])` client-side. The Field is hidden from the runtime form while still being visible on the canvas for configuration. Default: off. |
+| **Column Header** | An optional custom label for the column in the record list. Leave blank to use the Field Name. Only relevant when **Is Table Column** is on. |
+| **Column Order** | A number that sets the left-to-right position of this column in the record list. Only relevant when **Is Table Column** is on. |
 | **Inline Style** | Optional CSS declaration string for visual styling of the displayed value |
 
 #### Dataset (data view)
@@ -733,12 +738,29 @@ The TreeView has four mutually exclusive operating modes, chosen by the properti
 
 > **Note:** CRUD mode and selection modes are mutually exclusive. If Can Create / Can Edit / Can Delete are enabled, the tree is in CRUD mode and selection is disabled. To use selection, leave all three CRUD properties off.
 
+#### Dataset Source (optional)
+
+By default a TreeView reads its hierarchical data directly from the node template's provisioned table. You can optionally back the tree reads with a **Custom Dataset** instead — for example, to read from a VIEW that pre-joins or pre-filters data. Add/edit/delete operations always write to the base table via the node's `id`, so the dataset VIEW does not need to be updatable.
+
+To enable a dataset source, set the following properties in the Property Inspector:
+
+| Property | Description |
+|---|---|
+| **Dataset** | The Dataset Manager dataset whose VIEW powers the tree's list, search, and paging queries. Leave blank to use the node template's provisioned table (default). |
+| **Key Column** | The dataset column that contains the node's unique identifier. The TreeView maps this column back to `id` internally so expand, select, and CRUD-by-id keep working. Required when a dataset is set. |
+| **Parent Column** | The dataset column that holds the self-referencing parent ID. Rows where this column is `NULL` are treated as root nodes. Required when a dataset is set. |
+
+> **Tip:** When a dataset is set, **Field** pickers inside the TreeView's row template list the dataset's columns instead of the node template's field keys — so you can display any column the VIEW exposes.
+
 #### TreeView-specific properties
 
 | Property | Description |
 |---|---|
 | **Row Designer** | The CRUD designer that defines the fields of each tree node |
 | **Row Version** | The published version of the node designer to use |
+| **Dataset** | *(Optional)* A Dataset Manager dataset that powers tree reads. See Dataset Source above. |
+| **Key Column** | *(Dataset source)* The dataset column that maps to the node's unique ID |
+| **Parent Column** | *(Dataset source)* The dataset column that holds the parent self-reference |
 | **Can Create** | Show an Add button so users can create new root and child nodes |
 | **Can Edit** | Show an Edit button per node so users can update node fields |
 | **Can Delete** | Show a Delete button per node. Deleting a node also deletes all of its descendants (cascade delete). |
@@ -746,7 +768,7 @@ The TreeView has four mutually exclusive operating modes, chosen by the properti
 | **Select All** | *(Multi-Select mode)* Checking a parent node automatically checks its entire subtree |
 | **View Mode** | Make the tree fully read-only, overriding all CRUD and selection properties |
 | **Page Size** | How many nodes to load at each level at a time (default: 25). Increase for wide trees; decrease for large or deep trees to keep load times fast. |
-| **Auth Filter Column** | A column name from the node template. When set, each signed-in user sees only the nodes where that column matches their own user ID — useful for personal task trees or user-scoped category lists. |
+| **Auth Filter Column** | A column name from the node template (or dataset). When set, each signed-in user sees only the nodes where that column matches their own user ID — useful for personal task trees or user-scoped category lists. |
 
 #### At runtime
 
@@ -780,6 +802,28 @@ The **Single Record** component embeds a complete data-entry form from another C
 3. Save.
 
 The embedded form displays all fields from the target designer and allows the user to create or edit exactly one record from that designer, from within the parent page.
+
+---
+
+### 4.20 Binding a Dataset to a CRUD Designer Version
+
+By default, a CRUD designer's record list reads rows from its own provisioned database table. You can optionally bind a **Custom Dataset** to a specific version so that the list (and its export) reads from the dataset's backing VIEW instead — useful when the VIEW applies joins, computed columns, or business-logic filters that you want to expose in the list without changing the underlying table schema. Create, edit, and delete operations always write to the base table by `id`, so the VIEW does not need to be updatable.
+
+**Convention:** The dataset VIEW must expose one column per field key in the designer plus the record ID as `<designerID>_id` (e.g. `customer_id`). FormForge maps that column back to `id` automatically for update and delete operations.
+
+**How to bind a dataset to a version:**
+
+1. In the **Designer Library**, locate the CRUD designer you want to configure.
+2. In the row's actions menu (⋯), choose **Version History**.
+3. Next to the version you want to configure, click **Dataset**. The Dataset dialog opens.
+4. Select a dataset from the dropdown (all datasets in the system are listed).
+5. Click **Save**. From this point on, the record list for any menu binding that uses this version will read from the dataset VIEW.
+
+To remove the binding, reopen the Dataset dialog and clear the selection, then save.
+
+> **Effect on Field components:** When a CRUD canvas version has a dataset bound, **Field** components placed directly on that canvas will offer the dataset's columns in their **Field Name** picker — in addition to the canvas's own field keys.
+
+> **Note:** The dataset binding is per version. Different versions of the same designer can bind to different datasets (or none).
 
 ---
 
@@ -1574,8 +1618,8 @@ A concise summary of which properties are specific to each component type. All c
 | **Row** | No | *(none — layout container)* |
 | **Tabs** | No | Orientation; per-tab: Tab Name, Padding, Content Gap |
 | **Repeater** | Yes (child table) | Row Designer, Row Version, Min Rows, Max Rows, Show Headers |
-| **TreeView** | Yes (tree table) | Row Designer, Row Version, Can Create/Edit/Delete, Is Multi-Select, Select All, View Mode, Page Size, Auth Filter Column |
-| **Repeater Field** | No | Field Name, Inline Style |
+| **TreeView** | Yes (tree table) | Row Designer, Row Version, Dataset, Key Column, Parent Column, Can Create/Edit/Delete, Is Multi-Select, Select All, View Mode, Page Size, Auth Filter Column |
+| **Field** | No | Field Name, Map Expression, Is Table Column, Column Header, Column Order, Inline Style |
 | **Dataset** | No | Dataset, Auth Filter Column, Filterable, Table View, Chart types, Category Column, Value Column, Aggregation |
 | **Single Record** | No | Designer, Version |
 

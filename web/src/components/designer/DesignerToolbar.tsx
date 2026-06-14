@@ -75,7 +75,7 @@ const LEAF_ELEMENTS: ReadonlyArray<{
   { type: 'DateTime Picker', label: 'DateTime Picker', icon: CalendarDays,      description: 'Date or datetime field' },
   { type: 'Color Picker',    label: 'Color Picker',    icon: Palette,           description: 'Color selector' },
   { type: 'Repeater',        label: 'Repeater',        icon: LayoutList,        description: 'Repeating row group' },
-  { type: 'Repeater Field',  label: 'Repeater Field',  icon: Variable,          description: 'Display a form value (Repeater row or surrounding form)' },
+  { type: 'Repeater Field',  label: 'Field',           icon: Variable,          description: 'Display a form/record value, optionally mapped or shown as a table column' },
   { type: 'TreeView',        label: 'Tree View',       icon: ListTree,          description: 'Self-referencing tree of a node template (lazy, paginated)' },
   { type: 'Image',           label: 'Image',           icon: ImageIcon,         description: 'Image preview' },
   { type: 'File',            label: 'File',            icon: Paperclip,         description: 'File upload field' },

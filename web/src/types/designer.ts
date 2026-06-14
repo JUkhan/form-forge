@@ -38,6 +38,14 @@ export interface DesignerElementProperties {
   showInTable?: boolean
   columnHeader?: string
   columnOrder?: number
+  // Field element (type "Repeater Field") — reusable display field.
+  // `mapExpression` is an optional JS expression that transforms the field's own
+  // value before display (e.g. `name.toUpperCase()`); see features/data-entry/mapExpression.ts.
+  // `isTableColumn` (default false) opts a top-level Field — one placed directly on a
+  // CRUD form, NOT inside a Repeater/TreeView — into the record-list table as a
+  // display-only column, reusing columnHeader/columnOrder above for its header + position.
+  mapExpression?: string
+  isTableColumn?: boolean
   // TreeView (extends Repeater) — a standalone self-referencing tree over the
   // selected node-template table (`rowDesignerId`). `pageSize` controls the
   // on-demand pagination per tree level. The CRUD flags gate the per-node
@@ -61,6 +69,15 @@ export interface DesignerElementProperties {
   // per user. Stamped with the current user on create (server-side) and the field is
   // hidden on the form; reads/edits/deletes are scoped so each user only sees their own.
   authFilterColumn?: string
+  // Dataset-backed TreeView (optional). When `optionsDatasetId` is set, the tree's
+  // hierarchical levels, per-level paging and search are read from that dataset's VIEW
+  // instead of the provisioned table, and the RepeaterField pickers list the dataset's
+  // columns. `datasetKeyField` / `datasetParentField` name the VIEW columns that act as
+  // the node id and the parent self-reference. The chosen key value is mapped back to
+  // `id` so per-node open/edit/delete (on the base table) keep working.
+  optionsDatasetId?: string
+  datasetKeyField?: string
+  datasetParentField?: string
   // Allow arbitrary properties
   [key: string]: unknown
 }
@@ -120,6 +137,14 @@ export interface ComponentSchemaDto {
    * field is hidden by DynamicComponent. Admin-managed from the Component Library.
    */
   authFilterFieldKey?: string | null
+  /**
+   * Optional per-version dataset binding (the CustomDataset id, null when none).
+   * When set, the record list reads its rows from that dataset's backing VIEW
+   * (paginated/filtered/sorted/auth-scoped the same way) instead of the
+   * provisioned table. The dataset's columns follow the fieldKey convention and
+   * expose the record id as `<designerId>_id`. Admin-managed from the Component Library.
+   */
+  datasetId?: string | null
   versions?: ComponentSchemaVersion[]
 }
 

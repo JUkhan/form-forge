@@ -231,40 +231,80 @@ function extractRowFormFieldKeys(root: DesignerElement | null): string[] {
 // "Field name" selector for a Repeater Field — its options are the scalar field
 // keys of the parent Repeater's referenced row-form component, at the version
 // pinned on that Repeater (its published version). Disabled with a hint until
-// the parent Repeater has a row-form component + version.
+// the parent Repeater has a row-form component + version. When the Field has no
+// Repeater/TreeView ancestor (a top-level Field on a CRUD form), `localFieldKeys`
+// supplies the options instead — the scalar fieldKeys already placed on THIS canvas.
 function RepeaterFieldNameSelect({
   id,
   value,
   rowDesignerId,
   rowVersion,
+  datasetId,
+  localFieldKeys,
   updateProp,
 }: {
   id: string
   value: string
   rowDesignerId: string
   rowVersion: number | undefined
+  // When the parent TreeView is dataset-backed, the field options come from the
+  // dataset's columns instead of the row form's fieldKeys.
+  datasetId?: string
+  // Set for a top-level Field (no Repeater/TreeView ancestor): the current
+  // canvas's own scalar fieldKeys, used as the option source.
+  localFieldKeys?: string[]
   updateProp: UpdateProp
 }) {
   const { t } = useTranslation()
-  const enabled = rowDesignerId !== '' && rowVersion !== undefined
+  const useDataset = (datasetId ?? '') !== ''
+  // Top-level Field: no parent row-form/dataset source, so options come from the
+  // fields on this same canvas (passed in by the inspector).
+  const useLocal = !useDataset && rowDesignerId === '' && localFieldKeys !== undefined
+
+  const schemaEnabled = !useDataset && !useLocal && rowDesignerId !== '' && rowVersion !== undefined
   const schemaQuery = useQuery({
     queryKey: ['designer', 'schema', rowDesignerId, rowVersion],
     queryFn: () => designerApi.getSchema(rowDesignerId, rowVersion),
-    enabled,
+    enabled: schemaEnabled,
+    staleTime: 60_000,
+  })
+  const columnsQuery = useQuery({
+    queryKey: ['dataset', 'columns', datasetId],
+    queryFn: () => getDatasetColumns(datasetId as string),
+    enabled: useDataset,
     staleTime: 60_000,
   })
 
-  const fieldKeys = extractRowFormFieldKeys(schemaQuery.data?.rootElement ?? null)
+  const fieldKeys = useLocal
+    ? (localFieldKeys as string[])
+    : useDataset
+      ? (columnsQuery.data?.columns ?? [])
+      : extractRowFormFieldKeys(schemaQuery.data?.rootElement ?? null)
+  const activeQuery = useDataset ? columnsQuery : schemaQuery
+  const enabled = useLocal || useDataset || schemaEnabled
+  // Loading/error states only apply to the query-backed sources, never to the
+  // synchronous local-fieldKeys source.
+  const isLoading = !useLocal && activeQuery.isLoading
+  const isError = !useLocal && activeQuery.isError
   const valueInList = value !== '' && fieldKeys.includes(value)
+  const staleSuffix = useLocal
+    ? '(not on this form)'
+    : useDataset
+      ? '(not in dataset)'
+      : '(not in row form)'
 
   const placeholder = !enabled
     ? t('designer.inspector.placeholders.fieldNameNoSource')
-    : schemaQuery.isLoading
+    : isLoading
       ? t('designer.inspector.placeholders.componentsLoading')
-      : schemaQuery.isError
+      : isError
         ? t('designer.inspector.placeholders.componentsLoadError')
         : fieldKeys.length === 0
-          ? t('designer.inspector.placeholders.fieldNameEmpty')
+          ? t(
+              useLocal
+                ? 'designer.inspector.placeholders.fieldNameEmptyLocal'
+                : 'designer.inspector.placeholders.fieldNameEmpty',
+            )
           : t('designer.inspector.placeholders.fieldNameSelect')
 
   const handleChange = (next: string) => {
@@ -276,16 +316,16 @@ function RepeaterFieldNameSelect({
       <Select
         value={value === '' ? SENTINEL_EMPTY : value}
         onValueChange={handleChange}
-        disabled={!enabled || schemaQuery.isLoading || schemaQuery.isError}
+        disabled={!enabled || isLoading || isError}
       >
         <SelectTrigger className={TRIGGER_COMPACT_CLASS}>
           <SelectValue placeholder={placeholder} />
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={SENTINEL_EMPTY}>{placeholder}</SelectItem>
-          {/* Keep a stale fieldName visible (e.g. the row form removed the field). */}
+          {/* Keep a stale fieldName visible (e.g. the source removed the field). */}
           {value !== '' && !valueInList && (
-            <SelectItem value={value}>{value} (not in row form)</SelectItem>
+            <SelectItem value={value}>{value} {staleSuffix}</SelectItem>
           )}
           {fieldKeys.map((k) => (
             <SelectItem key={k} value={k}>
@@ -299,6 +339,114 @@ function RepeaterFieldNameSelect({
         dangerouslySetInnerHTML={{ __html: t('designer.inspector.help.fieldName') }}
       />
     </Field>
+  )
+}
+
+// TreeView "Dataset source" — optionally back the tree with a dataset VIEW. Pick a dataset,
+// then choose which of its columns is the node id (key) and which is the parent self-reference.
+// When set, the tree's levels / paging / search read from the dataset, and the RepeaterField
+// pickers list the dataset's columns. Clearing the dataset restores the provisioned-table tree.
+function TreeViewDatasetSourceFields({
+  id,
+  datasetId,
+  keyField,
+  parentField,
+  updateProp,
+}: {
+  id: string
+  datasetId: string
+  keyField: string
+  parentField: string
+  updateProp: UpdateProp
+}) {
+  const { t } = useTranslation()
+
+  const datasetsQuery = useQuery({
+    queryKey: ['datasets', 'list', 1, 100],
+    queryFn: () => listDatasets(1, 100),
+    staleTime: 60_000,
+  })
+  const datasets = datasetsQuery.data?.data ?? []
+  const datasetInList = datasets.some((d) => d.id === datasetId)
+
+  const columnsQuery = useQuery({
+    queryKey: ['dataset', 'columns', datasetId],
+    queryFn: () => getDatasetColumns(datasetId),
+    enabled: datasetId !== '',
+    staleTime: 60_000,
+  })
+  const columns = columnsQuery.data?.columns ?? []
+  const columnsReady = datasetId !== '' && !columnsQuery.isLoading && !columnsQuery.isError
+
+  const handleDatasetChange = (next: string) => {
+    updateProp(id, 'optionsDatasetId', next === SENTINEL_EMPTY ? '' : next)
+    // Clear column mappings whenever the dataset changes or is cleared.
+    updateProp(id, 'datasetKeyField', '')
+    updateProp(id, 'datasetParentField', '')
+  }
+
+  const datasetOptions: ComboboxOption[] = [
+    { value: SENTINEL_EMPTY, label: t('designer.inspector.fields.treeViewDatasetNone') },
+    ...(!datasetInList && datasetId !== ''
+      ? [{ value: datasetId, label: `${datasetId} (not in list)` }]
+      : []),
+    ...datasets.map((d) => ({ value: d.id, label: d.datasetName })),
+  ]
+
+  const colOptions = (current: string): ComboboxOption[] => [
+    ...(current !== '' && !columns.includes(current)
+      ? [{ value: current, label: `${current} (not in dataset)` }]
+      : []),
+    ...columns.map((c) => ({ value: c, label: c })),
+  ]
+
+  return (
+    <>
+      <Field label={t('designer.inspector.fields.treeViewDataset')}>
+        <Combobox
+          value={datasetId === '' ? SENTINEL_EMPTY : datasetId}
+          onValueChange={handleDatasetChange}
+          options={datasetOptions}
+          placeholder={t('designer.inspector.fields.treeViewDatasetNone')}
+          searchPlaceholder={t('designer.inspector.placeholders.datasetsSelect')}
+          disabled={datasetsQuery.isLoading || datasetsQuery.isError}
+          loading={datasetsQuery.isLoading}
+          className={TRIGGER_COMPACT_CLASS}
+          aria-label={t('designer.inspector.fields.treeViewDataset')}
+        />
+        <span className="text-[10px] text-muted-foreground">
+          {t('designer.inspector.help.treeViewDataset')}
+        </span>
+      </Field>
+      {datasetId !== '' && (
+        <>
+          <Field label={`${t('designer.inspector.fields.treeViewDatasetKeyField')} *`}>
+            <Combobox
+              value={keyField}
+              onValueChange={(v) => updateProp(id, 'datasetKeyField', v)}
+              options={colOptions(keyField)}
+              placeholder={t('designer.inspector.placeholders.datasetColumnSelect')}
+              disabled={!columnsReady}
+              loading={columnsQuery.isLoading}
+              className={cn(TRIGGER_COMPACT_CLASS, keyField === '' && 'border-destructive')}
+              aria-label={t('designer.inspector.fields.treeViewDatasetKeyField')}
+            />
+          </Field>
+          <Field label={`${t('designer.inspector.fields.treeViewDatasetParentField')} *`}>
+            <Combobox
+              value={parentField}
+              onValueChange={(v) => updateProp(id, 'datasetParentField', v)}
+              options={colOptions(parentField)}
+              placeholder={t('designer.inspector.placeholders.datasetColumnSelect')}
+              disabled={!columnsReady}
+              loading={columnsQuery.isLoading}
+              className={cn(TRIGGER_COMPACT_CLASS, parentField === '' && 'border-destructive')}
+              aria-label={t('designer.inspector.fields.treeViewDatasetParentField')}
+            />
+          </Field>
+        </>
+      )}
+    </>
   )
 }
 
@@ -1697,6 +1845,8 @@ function DatasetComponentFields({
 function PropertyFields({
   element,
   repeaterAncestor,
+  localFieldKeys,
+  formDatasetId,
   updateProp,
 }: {
   element: DesignerElement
@@ -1704,6 +1854,13 @@ function PropertyFields({
   // 'Repeater Field' branch reads it today, to decide whether the 'Header
   // name' field should surface.
   repeaterAncestor: DesignerElement | null
+  // The current canvas's own scalar fieldKeys — supplied for a top-level Field
+  // (no Repeater/TreeView ancestor) so its "Field name" picker has options.
+  localFieldKeys?: string[]
+  // The component's per-version dataset binding (CustomDataset id) or null. When
+  // set, a top-level Field's "Field name" options come from the dataset's columns
+  // instead of localFieldKeys.
+  formDatasetId?: string | null
   updateProp: UpdateProp
 }) {
   const { t } = useTranslation()
@@ -2256,6 +2413,13 @@ function PropertyFields({
             rowVersion={optNum('rowVersion')}
             updateProp={updateProp}
           />
+          <TreeViewDatasetSourceFields
+            id={id}
+            datasetId={str('optionsDatasetId')}
+            keyField={str('datasetKeyField')}
+            parentField={str('datasetParentField')}
+            updateProp={updateProp}
+          />
           <TreeViewAuthFilterSelect
             id={id}
             value={str('authFilterColumn')}
@@ -2391,8 +2555,31 @@ function PropertyFields({
                 ? Number(repeaterAncestor.properties.rowVersion)
                 : undefined
             }
+            datasetId={
+              repeaterAncestor
+                ? typeof repeaterAncestor.properties.optionsDatasetId === 'string'
+                  ? repeaterAncestor.properties.optionsDatasetId
+                  : ''
+                : // Top-level Field: a dataset-bound component sources options from
+                  // the dataset's columns (takes precedence over localFieldKeys).
+                  (formDatasetId ?? '')
+            }
+            localFieldKeys={repeaterAncestor === null ? localFieldKeys : undefined}
             updateProp={updateProp}
           />
+          <Field label={t('designer.inspector.fields.mapExpression')}>
+            <Textarea
+              value={str('mapExpression')}
+              onChange={(e) => updateProp(id, 'mapExpression', e.target.value)}
+              placeholder={t('designer.inspector.placeholders.mapExpression')}
+              rows={2}
+              className={cn(INPUT_COMPACT_CLASS, 'font-mono leading-snug resize-y min-h-[44px]')}
+            />
+            <span
+              className="text-[10px] text-muted-foreground"
+              dangerouslySetInnerHTML={{ __html: t('designer.inspector.help.mapExpression') }}
+            />
+          </Field>
           {repeaterAncestor?.properties.showHeaders ? (
             <Field label={t('designer.inspector.fields.headerName')}>
               <Input
@@ -2406,6 +2593,44 @@ function PropertyFields({
                 dangerouslySetInnerHTML={{ __html: t('designer.inspector.help.headerName') }}
               />
             </Field>
+          ) : null}
+          {/* CRUD record-list column controls — only for a top-level Field (one NOT
+              inside a Repeater/TreeView). Inside a row template the Repeater owns the
+              tabular columns, so these would be meaningless there. */}
+          {repeaterAncestor === null ? (
+            <div className="mt-2 flex flex-col gap-3 border-t border-border pt-3">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {t('designer.inspector.tableColumnHeader')}
+              </p>
+              <BoolField
+                label={t('designer.inspector.fields.isTableColumn')}
+                checked={bool('isTableColumn')}
+                onChange={(v) => updateProp(id, 'isTableColumn', v)}
+              />
+              <span
+                className="text-[10px] text-muted-foreground"
+                dangerouslySetInnerHTML={{ __html: t('designer.inspector.help.isTableColumn') }}
+              />
+              {bool('isTableColumn') ? (
+                <>
+                  <Field label={t('designer.inspector.fields.columnHeader')}>
+                    <Input
+                      value={str('columnHeader')}
+                      onChange={(e) => updateProp(id, 'columnHeader', e.target.value)}
+                      placeholder={t('designer.inspector.placeholders.columnHeader')}
+                      className={INPUT_COMPACT_CLASS}
+                    />
+                  </Field>
+                  <Field label={t('designer.inspector.fields.columnOrder')}>
+                    <OptionalNumberInput
+                      value={optNum('columnOrder')}
+                      onChange={(v) => updateProp(id, 'columnOrder', v)}
+                      onClear={() => updateProp(id, 'columnOrder', undefined)}
+                    />
+                  </Field>
+                </>
+              ) : null}
+            </div>
           ) : null}
           <StyleClassesField id={id} value={str('styleClasses')} updateProp={updateProp} />
           <Field label={t('designer.inspector.fields.inlineStyle')}>
@@ -2620,6 +2845,10 @@ export default function PropertyInspector() {
   const rootElement = useDesignerCanvasStore((s) => s.rootElement)
   const updateProp = useDesignerCanvasStore((s) => s.updateElementProperty)
   const selectElement = useDesignerCanvasStore((s) => s.selectElement)
+  // Per-version dataset binding for the component being edited. When set, a
+  // top-level Field's "Field name" options come from the dataset's columns
+  // (the record list reads from the dataset, so those are the available fields).
+  const formDatasetId = useDesignerCanvasStore((s) => s.datasetId)
 
   const selected = findById(rootElement, selectedElementId ?? '')
 
@@ -2657,6 +2886,14 @@ export default function PropertyInspector() {
   // Repeater Field reads this to decide whether the 'Header name' field surfaces.
   const repeaterAncestor =
     selected.type === 'Repeater Field' ? findRepeaterAncestor(rootElement, selected.id) : null
+  // For a top-level Field (no Repeater/TreeView ancestor) the "Field name" picker
+  // sources its options from the fields on THIS canvas. extractRowFormFieldKeys
+  // walks the tree collecting scalar fieldKeys and skips Repeater subtrees, which
+  // is exactly the candidate set for a form-level Field.
+  const localFieldKeys =
+    selected.type === 'Repeater Field' && repeaterAncestor === null
+      ? extractRowFormFieldKeys(rootElement)
+      : undefined
 
   const visHideAll =
     selected.properties.hideWhenAll !== undefined && selected.properties.hideWhenAll !== null
@@ -2684,7 +2921,7 @@ export default function PropertyInspector() {
       </div>
       {isTabChild && parent
         ? <TabChildFields element={selected} parent={parent} updateProp={updateProp} />
-        : <PropertyFields element={selected} repeaterAncestor={repeaterAncestor} updateProp={updateProp} />}
+        : <PropertyFields element={selected} repeaterAncestor={repeaterAncestor} localFieldKeys={localFieldKeys} formDatasetId={formDatasetId} updateProp={updateProp} />}
       <VisibilityFields
         id={selected.id}
         hideWhenAll={visHideAll}

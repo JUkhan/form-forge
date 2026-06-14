@@ -59,11 +59,23 @@ function buildQueryString(params: RecordListParams): string {
   return qs ? `?${qs}` : ''
 }
 
-export function listRecords(
+export async function listRecords(
   designerId: string,
   params: RecordListParams,
 ): Promise<RecordPagedResult> {
-  return httpClient.get<RecordPagedResult>(
+  const result = await httpClient.get<RecordPagedResult>(
     `/api/data/${encodeURIComponent(designerId)}${buildQueryString(params)}`,
   )
+  // Dataset-backed lists expose the record id as `<designerId>_id` (the dataset
+  // convention) instead of the system `id`. Normalize it to `id` so the table,
+  // row navigation and update/delete paths work unchanged. No-op for the regular
+  // table path, which already returns `id`.
+  const idColumn = `${designerId}_id`
+  for (const record of result.data) {
+    const rec = record as Record<string, unknown>
+    if (rec.id == null && rec[idColumn] != null) {
+      rec.id = rec[idColumn]
+    }
+  }
+  return result
 }

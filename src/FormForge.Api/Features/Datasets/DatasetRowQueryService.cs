@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using Dapper;
 using FormForge.Api.Domain.ValueTypes;
 using FormForge.Api.Features.Datasets.Dtos;
@@ -58,6 +59,35 @@ internal sealed record DatasetChartResult(
     DatasetChartData? Data = null,
     string? ErrorDetail = null);
 
+// One level of a dataset-backed tree: the direct children of ParentId (roots when null/blank),
+// matched by ParentColumn == KeyColumn of the parent. KeyColumn/ParentColumn name the dataset
+// VIEW columns that act as the node id and the self-reference. Search substring-matches every
+// column. AuthFilterColumn scopes to the requesting user (value is the server-resolved id).
+internal sealed record DatasetTreeLevelRequest(
+    string KeyColumn,
+    string ParentColumn,
+    string? ParentId = null,
+    string? Search = null,
+    int Page = 1,
+    int PageSize = 25,
+    string? AuthFilterColumn = null);
+
+internal sealed record DatasetTreeLevelPage(
+    IReadOnlyList<IDictionary<string, object?>> Data,
+    bool HasNextPage,
+    int Page,
+    int PageSize);
+
+internal sealed record DatasetTreeLevelResult(
+    DatasetRowsOutcome Outcome,
+    DatasetTreeLevelPage? Page = null,
+    string? ErrorDetail = null);
+
+internal sealed record DatasetTreeDescendantsResult(
+    DatasetRowsOutcome Outcome,
+    IReadOnlyList<string>? Ids = null,
+    string? ErrorDetail = null);
+
 internal interface IDatasetRowQueryService
 {
     // authUserId (optional) is the requesting user's id; combined with the request's
@@ -71,6 +101,16 @@ internal interface IDatasetRowQueryService
 
     Task<DatasetChartResult> GetChartAsync(
         Guid datasetId, DatasetChartRequest request, CancellationToken ct, Guid? authUserId = null);
+
+    // One lazy, paginated level of a dataset-backed TreeView (roots or a parent's children),
+    // each row carrying a derived `_has_children` flag.
+    Task<DatasetTreeLevelResult> GetTreeLevelAsync(
+        Guid datasetId, DatasetTreeLevelRequest request, CancellationToken ct, Guid? authUserId = null);
+
+    // The key-column values of every descendant of ParentId (recursive), for cascade select.
+    Task<DatasetTreeDescendantsResult> GetTreeDescendantsAsync(
+        Guid datasetId, string keyColumn, string parentColumn, string parentId,
+        string? authFilterColumn, CancellationToken ct, Guid? authUserId = null);
 }
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812",
@@ -309,6 +349,192 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         {
             await conn.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    public async Task<DatasetTreeLevelResult> GetTreeLevelAsync(
+        Guid datasetId, DatasetTreeLevelRequest request, CancellationToken ct, Guid? authUserId = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var page = request.Page < 1 ? 1 : request.Page;
+        var pageSize = request.PageSize is < 1 or > 100 ? 25 : request.PageSize;
+
+        var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
+            if (name is null)
+                return new DatasetTreeLevelResult(DatasetRowsOutcome.NotFound);
+
+            var cols = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
+            var columnTypes = cols.Types;
+            if (!columnTypes.ContainsKey(request.KeyColumn))
+                return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown key column '{request.KeyColumn}'.");
+            if (!columnTypes.ContainsKey(request.ParentColumn))
+                return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown parent column '{request.ParentColumn}'.");
+
+            var authFilter = ResolveAuthFilter(request.AuthFilterColumn, authUserId);
+            if (authFilter is { } afCheck && !columnTypes.ContainsKey(afCheck.Column))
+                return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown auth filter column '{afCheck.Column}'.");
+
+            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
+            var parameters = new DynamicParameters();
+
+            // Level WHERE = parent predicate (+ optional search OR across all columns) +
+            // server-resolved auth scope. Built as one FilterGroupDto so DatasetFilterWhereBuilder
+            // handles value coercion/parameterisation; its predicates are unqualified and resolve
+            // to the outer "t" relation (the EXISTS subquery below has its own alias "c").
+            var group = BuildTreeLevelFilterGroup(request, cols.Order);
+            var where = DatasetFilterWhereBuilder.Build(group, columnTypes, parameters, authFilter);
+            if (!where.IsValid)
+                return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: where.Error);
+
+            // _has_children: correlated EXISTS over the same VIEW linking child.parent = t.key,
+            // honoring the auth scope so a node whose only children are hidden reads as a leaf.
+            var hasChildren =
+                $"EXISTS (SELECT 1 FROM {viewRef} c WHERE c.{QuoteIdentifier(request.ParentColumn)} = t.{QuoteIdentifier(request.KeyColumn)}";
+            if (authFilter is { } af)
+            {
+                object hcAuthValue = columnTypes.TryGetValue(af.Column, out var at) && at == "uuid"
+                    ? af.Value
+                    : af.Value.ToString();
+                parameters.Add("p_hc_auth", hcAuthValue);
+                hasChildren += $" AND c.{QuoteIdentifier(af.Column)} = @p_hc_auth";
+            }
+            hasChildren += ") AS _has_children";
+
+            // Stable ordering for pagination — the key column (the VIEW may have no created_at).
+            var orderBy = $" ORDER BY t.{QuoteIdentifier(request.KeyColumn)} ASC";
+
+            parameters.Add("p_limit", pageSize + 1);
+            parameters.Add("p_offset", (long)(page - 1) * pageSize);
+
+            var selectList = string.Join(", ", cols.Order.Select(c => $"t.{QuoteIdentifier(c)}"));
+            var sql =
+                $"SELECT {selectList}, {hasChildren} FROM {viewRef} t{where.Where}{orderBy} " +
+                "LIMIT @p_limit OFFSET @p_offset";
+
+            var rows = await QueryRowsAsync(conn, sql, parameters, CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            var hasNextPage = rows.Count > pageSize;
+            if (hasNextPage) rows.RemoveAt(rows.Count - 1);
+
+            return new DatasetTreeLevelResult(DatasetRowsOutcome.Success,
+                new DatasetTreeLevelPage(rows, hasNextPage, page, pageSize));
+        }
+        finally
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    public async Task<DatasetTreeDescendantsResult> GetTreeDescendantsAsync(
+        Guid datasetId, string keyColumn, string parentColumn, string parentId,
+        string? authFilterColumn, CancellationToken ct, Guid? authUserId = null)
+    {
+        var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
+            if (name is null)
+                return new DatasetTreeDescendantsResult(DatasetRowsOutcome.NotFound);
+
+            var cols = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
+            var columnTypes = cols.Types;
+            if (!columnTypes.ContainsKey(keyColumn))
+                return new DatasetTreeDescendantsResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown key column '{keyColumn}'.");
+            if (!columnTypes.ContainsKey(parentColumn))
+                return new DatasetTreeDescendantsResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown parent column '{parentColumn}'.");
+
+            var authFilter = ResolveAuthFilter(authFilterColumn, authUserId);
+            if (authFilter is { } afc && !columnTypes.ContainsKey(afc.Column))
+                return new DatasetTreeDescendantsResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown auth filter column '{afc.Column}'.");
+
+            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
+            var kc = QuoteIdentifier(keyColumn);
+            var pc = QuoteIdentifier(parentColumn);
+
+            var parameters = new DynamicParameters();
+            // Coerce the anchor parent id to the parent column's type (uuid -> Guid).
+            object parentParam = columnTypes.TryGetValue(parentColumn, out var pcType) && pcType == "uuid"
+                ? (Guid.TryParse(parentId, out var pg) ? pg : (object)parentId)
+                : parentId;
+            parameters.Add("p_parent", parentParam);
+
+            var authAnchor = string.Empty;
+            var authRec = string.Empty;
+            if (authFilter is { } af)
+            {
+                object authVal = columnTypes.TryGetValue(af.Column, out var at) && at == "uuid"
+                    ? af.Value
+                    : af.Value.ToString();
+                parameters.Add("p_auth", authVal);
+                var ac = QuoteIdentifier(af.Column);
+                authAnchor = $" AND {ac} = @p_auth";
+                authRec = $" AND c.{ac} = @p_auth";
+            }
+
+            // UNION (not UNION ALL) dedups in case the dataset is not a strict tree.
+            var sql =
+                $"WITH RECURSIVE d AS (" +
+                $"SELECT {kc} AS k FROM {viewRef} WHERE {pc} = @p_parent{authAnchor} " +
+                $"UNION SELECT c.{kc} FROM {viewRef} c JOIN d ON c.{pc} = d.k{authRec}" +
+                $") SELECT k FROM d";
+
+            var raw = await conn.QueryAsync(new CommandDefinition(
+                sql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)).ConfigureAwait(false);
+            var ids = raw
+                .Cast<IDictionary<string, object>>()
+                .Select(r => r.TryGetValue("k", out var v) && v is not null and not DBNull
+                    ? Convert.ToString(v, CultureInfo.InvariantCulture) ?? string.Empty
+                    : string.Empty)
+                .Where(s => s.Length > 0)
+                .ToList();
+            return new DatasetTreeDescendantsResult(DatasetRowsOutcome.Success, ids);
+        }
+        finally
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    // Composes the level WHERE tree: the parent predicate (roots = parent IS NULL) plus an
+    // optional OR-group of ILIKE conditions across every column for `search`.
+    private static FilterGroupDto BuildTreeLevelFilterGroup(
+        DatasetTreeLevelRequest request, IReadOnlyList<string> allColumns)
+    {
+        var items = new List<FilterItemDto>();
+
+        if (string.IsNullOrWhiteSpace(request.ParentId))
+        {
+            items.Add(new FilterConditionDto(
+                "parent", "condition", string.Empty, request.ParentColumn, "IS NULL",
+                JsonSerializer.SerializeToElement((string?)null)));
+        }
+        else
+        {
+            items.Add(new FilterConditionDto(
+                "parent", "condition", string.Empty, request.ParentColumn, "=",
+                JsonSerializer.SerializeToElement(request.ParentId.Trim())));
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Search))
+        {
+            var term = request.Search.Trim();
+            var searchItems = allColumns
+                .Select(c => (FilterItemDto)new FilterConditionDto(
+                    $"s_{c}", "condition", string.Empty, c, "ILIKE",
+                    JsonSerializer.SerializeToElement(term)))
+                .ToList();
+            if (searchItems.Count > 0)
+                items.Add(new FilterGroupDto("search", "group", "OR", searchItems));
+        }
+
+        return new FilterGroupDto("root", "group", "AND", items);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────

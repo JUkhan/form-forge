@@ -84,6 +84,18 @@ internal sealed record SetAuthFilterFieldKeyResult(
     SetAuthFilterFieldKeyOutcome Outcome,
     DesignerResponse? Designer = null);
 
+internal enum SetDatasetOutcome
+{
+    Success,
+    DesignerNotFound,
+    VersionNotFound,
+    DatasetNotFound,   // the supplied datasetId does not match any CustomDataset
+}
+
+internal sealed record SetDatasetResult(
+    SetDatasetOutcome Outcome,
+    DesignerResponse? Designer = null);
+
 internal interface IDesignerService
 {
     Task<CreateDesignerResult> CreateAsync(CreateDesignerRequest request, Guid createdBy, CancellationToken ct);
@@ -98,6 +110,8 @@ internal interface IDesignerService
         string designerId, int version, string newStatus, Guid updatedBy, CancellationToken ct);
     Task<SetAuthFilterFieldKeyResult> SetAuthFilterFieldKeyAsync(
         string designerId, int version, string? fieldKey, CancellationToken ct);
+    Task<SetDatasetResult> SetDatasetAsync(
+        string designerId, int version, Guid? datasetId, CancellationToken ct);
     Task<DuplicateResult> DuplicateAsync(string designerId, Guid createdBy, CancellationToken ct);
 }
 
@@ -586,6 +600,50 @@ internal sealed class DesignerService(
         return new SetAuthFilterFieldKeyResult(SetAuthFilterFieldKeyOutcome.Success, Designer: response);
     }
 
+    public async Task<SetDatasetResult> SetDatasetAsync(
+        string designerId,
+        int version,
+        Guid? datasetId,
+        CancellationToken ct)
+    {
+        var schema = await db.ComponentSchemas
+            .FirstOrDefaultAsync(s => s.DesignerId == designerId, ct)
+            .ConfigureAwait(false);
+        if (schema is null)
+        {
+            return new SetDatasetResult(SetDatasetOutcome.DesignerNotFound);
+        }
+
+        var target = await db.ComponentSchemaVersions
+            .FirstOrDefaultAsync(v => v.DesignerId == designerId && v.Version == version, ct)
+            .ConfigureAwait(false);
+        if (target is null)
+        {
+            return new SetDatasetResult(SetDatasetOutcome.VersionNotFound);
+        }
+
+        // null clears the binding; otherwise the id must reference an existing dataset.
+        // The combobox only offers real datasets, but the server is the independent guard.
+        if (datasetId is { } id)
+        {
+            var exists = await db.CustomDatasets
+                .AsNoTracking()
+                .AnyAsync(d => d.Id == id, ct)
+                .ConfigureAwait(false);
+            if (!exists)
+            {
+                return new SetDatasetResult(SetDatasetOutcome.DatasetNotFound);
+            }
+        }
+
+        target.DatasetId = datasetId;
+        schema.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+
+        var response = ToResponse(schema, target, includeVersions: false);
+        return new SetDatasetResult(SetDatasetOutcome.Success, Designer: response);
+    }
+
     public async Task<DesignerResponse?> GetVersionAsync(string designerId, int version, CancellationToken ct)
     {
         // Schema must still exist even if the version doesn't — distinguish a
@@ -798,6 +856,7 @@ internal sealed class DesignerService(
             schema.UpdatedAt,
             version.PublishedAt,
             version.AuthFilterFieldKey,
+            version.DatasetId,
             versions);
     }
 }

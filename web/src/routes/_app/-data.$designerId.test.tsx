@@ -546,11 +546,11 @@ describe('RecordListPage (data.$designerId route body)', () => {
     // snake_case fieldKey humanized for display (title → "Title").
     expect(screen.getByRole('button', { name: /Title/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Status/ })).toBeTruthy()
-    // System columns rendered after the user columns: createdAt, updatedAt. The
-    // raw id column was removed — the record id is not surfaced as a table column.
+    // No system columns are surfaced as table columns: the raw id, createdAt and
+    // updatedAt columns were removed — only schema-derived user columns show.
     expect(screen.queryByRole('button', { name: /data\.entry\.columnId/ })).toBeNull()
-    expect(screen.getByRole('button', { name: /data\.entry\.columnCreatedAt/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /data\.entry\.columnUpdatedAt/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /data\.entry\.columnCreatedAt/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /data\.entry\.columnUpdatedAt/ })).toBeNull()
   })
 
   it('clicking an unsorted column header calls onSortChange with col:asc (AC-2)', () => {
@@ -753,19 +753,6 @@ describe('RecordListPage (data.$designerId route body)', () => {
     const titleHeaderBtn = screen.getByRole('button', { name: /Title/ })
     const th = titleHeaderBtn.closest('th')
     expect(th?.getAttribute('aria-sort')).toBe('ascending')
-  })
-
-  it('sends snake_case sort keys for system columns so the backend whitelist accepts them (AC-2)', () => {
-    designerFieldKeysHandles.fieldKeys = []
-    recordListHandles.data = {
-      data: [{ id: 'r1', createdAt: '2026-05-26T10:00:00Z', updatedAt: '2026-05-26T10:00:00Z',
-        createdBy: null, updatedBy: null, isDeleted: false, cascadeEventId: null }],
-      total: 1, page: 1, pageSize: 25, totalPages: 1,
-    }
-    const onSortChange = vi.fn()
-    renderList({ onSortChange })
-    fireEvent.click(screen.getByRole('button', { name: /data\.entry\.columnCreatedAt/ }))
-    expect(onSortChange).toHaveBeenCalledWith('created_at:asc')
   })
 
   it('renders a soft-deleted row with strikethrough text and a Deleted badge (AC-5)', () => {

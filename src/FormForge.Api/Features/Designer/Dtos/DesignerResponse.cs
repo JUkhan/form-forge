@@ -24,6 +24,10 @@ internal sealed record DesignerResponse(
     // the version identified by LatestVersion). Surfaced so the renderer can hide
     // the matching form field and the Component Library can show the current value.
     string? AuthFilterFieldKey = null,
+    // Optional per-version dataset binding (null when none configured for the version
+    // identified by LatestVersion). Surfaced so the Component Library can show the
+    // current selection; when set, the record list reads from this dataset's VIEW.
+    Guid? DatasetId = null,
     IReadOnlyList<DesignerVersionSummary>? Versions = null);
 
 internal sealed record DesignerVersionSummary(

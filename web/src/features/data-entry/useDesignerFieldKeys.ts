@@ -46,7 +46,17 @@ export interface ReferenceFilterConfig {
 export interface TableColumn {
   // Key into the row object the backend returns. For scalar fields this is the
   // fieldKey; for derived columns it is the subquery alias (see buildDerivedAlias).
+  // For a Field column (type "Repeater Field") this is a synthetic unique id (the
+  // element id) so it never collides with a real column — read the row via
+  // `accessorKey` instead.
   dataKey: string
+  // The row key to actually read the cell value from. Defaults to `dataKey` when
+  // absent; set to the underlying `fieldName` for Field columns whose `dataKey`
+  // is a synthetic element id.
+  accessorKey?: string
+  // Optional JS map expression applied to the cell's raw value before display
+  // (Field columns only — see features/data-entry/mapExpression.ts).
+  mapExpression?: string
   // Header text: author override (columnHeader) or the humanized fieldKey.
   header: string
   // Ascending display position; columnOrder when set, else document order.
@@ -155,6 +165,29 @@ function collectColumns(
         ? Number(p.columnOrder)
         : docIndex
     out.push({ docIndex, column: { ...column, order } })
+  }
+
+  if (type === 'Repeater Field') {
+    // A top-level Field opted into the table (Is Table). It shows another field's
+    // value — read via `accessorKey` (the underlying fieldName, always present in
+    // the row since the backend SELECTs every provisioned column) and optionally
+    // transformed by `mapExpression`, applied client-side in RecordListPage.
+    // dataKey is the element id so it never collides with the real fieldName column.
+    // Display-only: not sortable or filterable. Fields nested in a Repeater are
+    // never reached here (the Repeater branch below returns without recursing).
+    const fieldName = str(p.fieldName).trim()
+    if (p.isTableColumn === true && fieldName !== '') {
+      const override = str(p.columnHeader).trim()
+      const expr = str(p.mapExpression).trim()
+      push({
+        dataKey: el.id,
+        accessorKey: fieldName,
+        header: override !== '' ? override : humanizeFieldKey(fieldName),
+        sortable: false,
+        mapExpression: expr !== '' ? expr : undefined,
+      })
+    }
+    return
   }
 
   if (type === 'Repeater') {

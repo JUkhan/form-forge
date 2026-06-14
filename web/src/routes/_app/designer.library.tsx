@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Copy,
+  Database,
   Eye,
   ExternalLink,
   FilePlus,
@@ -47,6 +48,7 @@ import {
 import { Combobox } from '@/components/ui/combobox'
 import { ApiError } from '@/lib/api/apiError'
 import { designerApi } from '@/features/designer/designerApi'
+import { listDatasets } from '@/features/datasets/datasetApi'
 import {
   getFieldKey,
   type ComponentSchemaDto,
@@ -374,6 +376,126 @@ function AuthFilterDialog({
   )
 }
 
+// "Dataset set up" popup for a single designer version. Binds a filterable combobox
+// of all datasets to the version's datasetId. Selecting "No dataset" clears it (the
+// record list reads from the provisioned table again). The description states the
+// dataset convention so an author can build a compatible dataset: its columns must
+// match the version's fieldKeys, and it must expose the record id as `<designerId>_id`.
+function DatasetDialog({
+  designerId,
+  version,
+  onClose,
+  qc,
+}: {
+  designerId: string
+  version: number
+  onClose: () => void
+  qc: QueryClient
+}) {
+  const { t } = useTranslation()
+
+  // Load the version's schema only for its persisted datasetId (the current binding).
+  const schemaQuery = useQuery({
+    queryKey: ['designer', 'schema', designerId, version],
+    queryFn: () => designerApi.getSchema(designerId, version),
+    staleTime: 60_000,
+  })
+  const schema = schemaQuery.data as ComponentSchemaDto | undefined
+
+  // The combobox source: all datasets. Small list, so fetch the first 100 like the
+  // designer-backed Dropdown picker in PropertyInspector does.
+  const datasetsQuery = useQuery({
+    queryKey: ['datasets', 'list', 1, 100],
+    queryFn: () => listDatasets(1, 100),
+    staleTime: 60_000,
+  })
+  // null = "not yet touched": fall back to the persisted binding until the user changes it.
+  const [selected, setSelected] = useState<string | null>(null)
+  const value = selected ?? schema?.datasetId ?? ''
+
+  const options = useMemo(() => {
+    const datasets = datasetsQuery.data?.data ?? []
+    const inList = datasets.some((d) => d.id === value)
+    return [
+      { value: '', label: t('designer.library.datasetNone') },
+      // A persisted-but-missing dataset (deleted/renamed) still shows so the user
+      // sees the current binding rather than a blank box.
+      ...(!inList && value !== ''
+        ? [{ value, label: t('designer.library.datasetMissing') }]
+        : []),
+      ...datasets.map((d) => ({ value: d.id, label: d.datasetName })),
+    ]
+  }, [datasetsQuery.data, value, t])
+
+  const mutation = useMutation({
+    mutationFn: (next: string | null) => designerApi.setDataset(designerId, version, next),
+    onSuccess: () => {
+      // Refresh the library's schema cache (RowMenu / flyout) and the renderer's
+      // component-schema cache so the bound source updates live.
+      void qc.invalidateQueries({ queryKey: ['designer', 'schema', designerId] })
+      void qc.invalidateQueries({ queryKey: ['component-schema', designerId] })
+      toast.success(t('designer.library.datasetSuccess'))
+      onClose()
+    },
+    onError: (err) => {
+      toast.error(
+        err instanceof ApiError && err.messageKey
+          ? t(err.messageKey)
+          : t('designer.library.datasetError'),
+      )
+    },
+  })
+
+  return (
+    <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {t('designer.library.datasetTitle', { version })}
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground whitespace-pre-line">
+          {t('designer.library.datasetDescription', { idColumn: `${designerId}_id` })}
+        </p>
+        {datasetsQuery.isError ? (
+          <div role="alert" className="text-sm text-destructive">
+            {t('designer.library.datasetLoadError')}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="dataset-binding" className="text-sm font-medium text-foreground">
+              {t('designer.library.datasetFieldLabel')}
+            </label>
+            <Combobox
+              id="dataset-binding"
+              value={value}
+              onValueChange={setSelected}
+              options={options}
+              placeholder={t('designer.library.datasetNone')}
+              searchPlaceholder={t('designer.library.datasetSearchPlaceholder')}
+              emptyText={t('designer.library.datasetEmpty')}
+              loading={datasetsQuery.isPending || schemaQuery.isPending}
+              aria-label={t('designer.library.datasetFieldLabel')}
+            />
+          </div>
+        )}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            type="button"
+            onClick={() => mutation.mutate(value === '' ? null : value)}
+            disabled={mutation.isPending || datasetsQuery.isPending || datasetsQuery.isError}
+          >
+            {t('common.save')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function RowMenu({ row, qc }: { row: ComponentSchemaListItem; qc: QueryClient }) {
   const { t } = useTranslation()
   const navigate = useNavigate({ from: '/designer/library' })
@@ -383,6 +505,8 @@ export function RowMenu({ row, qc }: { row: ComponentSchemaListItem; qc: QueryCl
   const [previewVersion, setPreviewVersion] = useState<number | null>(null)
   // The version whose "Auth filter fieldKey set up" dialog is open (null = closed).
   const [authFilterVersion, setAuthFilterVersion] = useState<number | null>(null)
+  // The version whose "Dataset set up" dialog is open (null = closed).
+  const [datasetVersion, setDatasetVersion] = useState<number | null>(null)
   const [showNewVersion, setShowNewVersion] = useState(false)
 
   // The menu must escape the table's overflow-x-auto wrapper (per CSS spec,
@@ -653,6 +777,23 @@ export function RowMenu({ row, qc }: { row: ComponentSchemaListItem; qc: QueryCl
                         </TooltipTrigger>
                         <TooltipContent>{t('designer.library.authFilterSetup', { version: v.version })}</TooltipContent>
                       </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            aria-label={t('designer.library.datasetSetup', { version: v.version })}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-overlay-hover active:bg-overlay-active hover:text-foreground"
+                            onClick={() => {
+                              setDatasetVersion(v.version)
+                              setOpen(false)
+                            }}
+                          >
+                            <Database className="h-4 w-4" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{t('designer.library.datasetSetup', { version: v.version })}</TooltipContent>
+                      </Tooltip>
                       {v.status === 'Published' ? (
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -741,6 +882,15 @@ export function RowMenu({ row, qc }: { row: ComponentSchemaListItem; qc: QueryCl
           designerId={row.designerId}
           version={authFilterVersion}
           onClose={() => setAuthFilterVersion(null)}
+          qc={qc}
+        />
+      )}
+
+      {datasetVersion !== null && (
+        <DatasetDialog
+          designerId={row.designerId}
+          version={datasetVersion}
+          onClose={() => setDatasetVersion(null)}
           qc={qc}
         />
       )}

@@ -112,6 +112,79 @@ describe('extractColumns', () => {
     expect(cols[0]).toMatchObject({ dataKey: 'status', sortable: true, filterKind: 'text' })
   })
 
+  it('emits a display-only column for a top-level Field with isTableColumn', () => {
+    const cols = extractColumns(
+      stack([
+        {
+          id: 'fld1',
+          type: 'Repeater Field',
+          properties: {
+            fieldName: 'name',
+            isTableColumn: true,
+            columnHeader: 'Loud Name',
+            mapExpression: 'name.toUpperCase()',
+          },
+        },
+      ]),
+    )
+    expect(cols).toEqual([
+      {
+        dataKey: 'fld1',
+        accessorKey: 'name',
+        header: 'Loud Name',
+        order: 0,
+        sortable: false,
+        mapExpression: 'name.toUpperCase()',
+      },
+    ])
+  })
+
+  it('humanizes the fieldName as the header when no columnHeader override is set', () => {
+    const cols = extractColumns(
+      stack([
+        {
+          id: 'fld1',
+          type: 'Repeater Field',
+          properties: { fieldName: 'full_name', isTableColumn: true },
+        },
+      ]),
+    )
+    expect(cols[0]).toMatchObject({ accessorKey: 'full_name', header: 'Full Name', sortable: false })
+    expect(cols[0].mapExpression).toBeUndefined()
+  })
+
+  it('omits a Field that has not opted into the table (isTableColumn falsy)', () => {
+    const cols = extractColumns(
+      stack([
+        { id: 'fld1', type: 'Repeater Field', properties: { fieldName: 'name' } },
+        { id: 'fld2', type: 'Repeater Field', properties: { fieldName: 'age', isTableColumn: false } },
+      ]),
+    )
+    expect(cols).toEqual([])
+  })
+
+  it('does not emit a column for a Field nested inside a Repeater', () => {
+    const cols = extractColumns(
+      stack([
+        {
+          id: 'rep',
+          type: 'Repeater',
+          properties: { fieldKey: 'lines', rowDesignerId: 'line_item' },
+          children: [
+            {
+              id: 'fld1',
+              type: 'Repeater Field',
+              // Even with isTableColumn set, a Field inside a Repeater is never
+              // reached (the Repeater branch returns without recursing).
+              properties: { fieldName: 'name', isTableColumn: true },
+            },
+          ],
+        },
+      ]),
+    )
+    expect(cols.map((c) => c.dataKey)).toEqual(['line_item_row_count'])
+  })
+
   it('emits a derived, display-only row-count column for a Repeater', () => {
     const cols = extractColumns(
       stack([

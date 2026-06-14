@@ -60,6 +60,13 @@ internal static class DesignerEndpoints
              .Produces(StatusCodes.Status404NotFound)
              .Produces(StatusCodes.Status422UnprocessableEntity);
 
+        group.MapPut("/{designerId}/versions/{version:int}/dataset", SetDatasetHandler)
+             .RequireAuthorization("platform-admin")
+             .WithSummary("Set or clear a version's bound dataset")
+             .Produces<DesignerResponse>(StatusCodes.Status200OK)
+             .Produces(StatusCodes.Status404NotFound)
+             .Produces(StatusCodes.Status422UnprocessableEntity);
+
         group.MapPost("/{designerId}/duplicate", DuplicateDesignerHandler)
              .RequireAuthorization("platform-admin")
              .WithSummary("Duplicate a designer to a new copy")
@@ -238,6 +245,36 @@ internal static class DesignerEndpoints
             SetAuthFilterFieldKeyOutcome.DesignerNotFound => DesignerNotFoundProblem(),
             SetAuthFilterFieldKeyOutcome.VersionNotFound => VersionNotFoundProblem(),
             SetAuthFilterFieldKeyOutcome.FieldKeyNotInVersion => AuthFilterFieldKeyInvalidProblem(),
+            _ => Results.Problem(
+                detail: "Something went wrong. Please try again.",
+                statusCode: StatusCodes.Status500InternalServerError,
+                extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["messageKey"] = "errors.genericError",
+                }),
+        };
+    }
+
+    private static async Task<IResult> SetDatasetHandler(
+        string designerId,
+        int version,
+        SetDatasetRequest request,
+        IDesignerService designerService,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(designerService);
+
+        var result = await designerService
+            .SetDatasetAsync(designerId, version, request.DatasetId, ct)
+            .ConfigureAwait(false);
+
+        return result.Outcome switch
+        {
+            SetDatasetOutcome.Success => Results.Ok(result.Designer),
+            SetDatasetOutcome.DesignerNotFound => DesignerNotFoundProblem(),
+            SetDatasetOutcome.VersionNotFound => VersionNotFoundProblem(),
+            SetDatasetOutcome.DatasetNotFound => DatasetBindingInvalidProblem(),
             _ => Results.Problem(
                 detail: "Something went wrong. Please try again.",
                 statusCode: StatusCodes.Status500InternalServerError,
@@ -459,6 +496,17 @@ internal static class DesignerEndpoints
             {
                 ["code"] = "AUTH_FILTER_FIELD_KEY_INVALID",
                 ["messageKey"] = "designers.authFilterFieldKeyInvalid",
+            });
+
+    private static IResult DatasetBindingInvalidProblem() =>
+        Results.Problem(
+            detail: "The selected dataset does not exist.",
+            title: "Invalid dataset binding",
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["code"] = "DATASET_BINDING_INVALID",
+                ["messageKey"] = "designers.datasetBindingInvalid",
             });
 
     private static IResult VersionNotFoundProblem() =>

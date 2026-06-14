@@ -5,6 +5,8 @@ using Dapper;
 using FormForge.Api.Common;
 using FormForge.Api.Common.Endpoints;
 using FormForge.Api.Common.Logging;
+using FormForge.Api.Features.Datasets;
+using FormForge.Api.Features.Datasets.Dtos;
 using FormForge.Api.Features.Designer;
 using FormForge.Api.Features.Permissions;
 using FormForge.Api.Features.Provisioning;
@@ -215,6 +217,7 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         IPermissionService permissionService,
+        IDatasetRowQueryService datasetRowQueryService,
         CancellationToken ct,
         int page = 1,
         int pageSize = 25,
@@ -283,6 +286,23 @@ internal static class DynamicDataEndpoints
         if (!TryParseAndValidateFilters(httpContext.Request.Query, allowedFilterCols, entry.Columns, out var filters, out var filterError))
             return Problems.ValidationFailed(filterError!);
 
+        // Dataset binding — when this version is bound to a dataset, the list reads from
+        // the dataset's backing VIEW instead of the provisioned table, applying the same
+        // pagination / filtering / sorting / auth-filter. Read fresh (like the auth filter)
+        // so an admin binding/unbinding from the Component Library takes effect on the next
+        // request without a version bump or registry invalidation. No implicit soft-delete
+        // filter is applied — a dataset's VIEW defines its own row set.
+        var listDatasetId = await GetDatasetIdAsync(db, safeId!.Value, boundVersion.Value, ct)
+            .ConfigureAwait(false);
+        if (listDatasetId is { } boundListDataset)
+        {
+            var datasetAuthFieldKey = await GetAuthFilterFieldKeyAsync(db, safeId!.Value, boundVersion.Value, ct)
+                .ConfigureAwait(false);
+            return await ListRecordsFromDatasetAsync(
+                boundListDataset, sortResult.Sorts, filters, page, pageSize,
+                datasetAuthFieldKey, httpContext, datasetRowQueryService, ct).ConfigureAwait(false);
+        }
+
         var isAdmin = await IsPlatformAdminAsync(httpContext, permissionService, ct).ConfigureAwait(false);
         filters = ApplyDefaultSoftDeleteFilter(filters, includeDeleted, isAdmin);
 
@@ -337,20 +357,37 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
+        IDatasetRowQueryService datasetRowQueryService,
         CancellationToken ct,
         string? parentId = null,
         int page = 1,
         int pageSize = 25,
         string? search = null,
-        string? authFilterColumn = null)
+        string? authFilterColumn = null,
+        // Dataset-backed TreeView: when datasetId + keyField + parentField are supplied,
+        // the level is read from the dataset VIEW (keyField = node id, parentField = self
+        // reference) instead of the provisioned table. Mutations still hit the base table.
+        string? datasetId = null,
+        string? keyField = null,
+        string? parentField = null)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(db);
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(datasetRowQueryService);
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
+
+        if (Guid.TryParse(datasetId, out var treeDatasetId)
+            && !string.IsNullOrWhiteSpace(keyField)
+            && !string.IsNullOrWhiteSpace(parentField))
+        {
+            return await ListTreeNodesFromDatasetAsync(
+                treeDatasetId, keyField!.Trim(), parentField!.Trim(), parentId, page, pageSize,
+                search, authFilterColumn, httpContext, datasetRowQueryService, ct).ConfigureAwait(false);
+        }
 
         Guid? parentGuid = null;
         if (!string.IsNullOrWhiteSpace(parentId))
@@ -425,17 +462,43 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
+        IDatasetRowQueryService datasetRowQueryService,
         CancellationToken ct,
         string? parentId = null,
-        string? authFilterColumn = null)
+        string? authFilterColumn = null,
+        string? datasetId = null,
+        string? keyField = null,
+        string? parentField = null)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(db);
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(datasetRowQueryService);
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
+
+        // Dataset-backed tree: descendant key values come from the dataset VIEW (recursive).
+        if (Guid.TryParse(datasetId, out var treeDatasetId)
+            && !string.IsNullOrWhiteSpace(keyField)
+            && !string.IsNullOrWhiteSpace(parentField))
+        {
+            if (string.IsNullOrWhiteSpace(parentId))
+                return Problems.ValidationFailed("Query parameter 'parentId' is required.");
+            var authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var duid)
+                ? duid : (Guid?)null;
+            var dResult = await datasetRowQueryService.GetTreeDescendantsAsync(
+                treeDatasetId, keyField!.Trim(), parentField!.Trim(), parentId.Trim(),
+                NormalizeDatasetAuthColumn(authFilterColumn), ct, authUserId).ConfigureAwait(false);
+            return dResult.Outcome switch
+            {
+                DatasetRowsOutcome.Success => Results.Ok(new TreeDescendantsResult(dResult.Ids ?? Array.Empty<string>())),
+                DatasetRowsOutcome.NotFound => Results.Ok(new TreeDescendantsResult(Array.Empty<string>())),
+                _ => Problems.ValidationFailed(dResult.ErrorDetail ?? "Invalid dataset tree query."),
+            };
+        }
+
         if (string.IsNullOrWhiteSpace(parentId)
             || !Guid.TryParse(parentId, CultureInfo.InvariantCulture, out var parentGuid))
             return Problems.ValidationFailed("Query parameter 'parentId' is required and must be a UUID.");
@@ -791,6 +854,7 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         IPermissionService permissionService,
+        IDatasetRowQueryService datasetRowQueryService,
         CancellationToken ct,
         string? format = null,
         string? sort = null,
@@ -854,6 +918,19 @@ internal static class DynamicDataEndpoints
 
         if (!TryParseAndValidateFilters(httpContext.Request.Query, allowedFilterCols, entry.Columns, out var filters, out var filterError))
             return Problems.ValidationFailed(filterError!);
+
+        // Dataset binding — export from the bound dataset's VIEW (same source as the list)
+        // so the file matches what the user sees. Honors the same filter/sort/auth-filter.
+        var exportDatasetId = await GetDatasetIdAsync(db, safeId!.Value, boundVersion.Value, ct)
+            .ConfigureAwait(false);
+        if (exportDatasetId is { } boundExportDataset)
+        {
+            var datasetAuthFieldKey = await GetAuthFilterFieldKeyAsync(db, safeId!.Value, boundVersion.Value, ct)
+                .ConfigureAwait(false);
+            return await ExportRecordsFromDatasetAsync(
+                boundExportDataset, sortResult.Sorts, filters, datasetAuthFieldKey,
+                title, writerFactory, httpContext, datasetRowQueryService, ct).ConfigureAwait(false);
+        }
 
         var isAdmin = await IsPlatformAdminAsync(httpContext, permissionService, ct).ConfigureAwait(false);
         filters = ApplyDefaultSoftDeleteFilter(filters, includeDeleted, isAdmin);
@@ -2591,6 +2668,195 @@ internal static class DynamicDataEndpoints
             .Select(v => v.AuthFilterFieldKey)
             .FirstOrDefaultAsync(ct)
             .ConfigureAwait(false);
+
+    // Reads the per-version dataset binding (null when the version is bound to no dataset).
+    // Fetched fresh — NOT cached in the schema registry — so an admin binding/unbinding from
+    // the Component Library takes effect on the next request without a version bump.
+    private static async Task<Guid?> GetDatasetIdAsync(
+        FormForgeDbContext db, string designerId, int version, CancellationToken ct) =>
+        await db.ComponentSchemaVersions
+            .AsNoTracking()
+            .Where(v => v.DesignerId == designerId && v.Version == version)
+            .Select(v => v.DatasetId)
+            .FirstOrDefaultAsync(ct)
+            .ConfigureAwait(false);
+
+    // Translates the list endpoint's parsed equality filters (pgName -> value, the same
+    // shape the dynamic-table path uses) into the canonical FilterGroupDto the dataset
+    // row-query service consumes. Each entry becomes an AND-ed "= value" condition; the
+    // dataset service validates each column against the VIEW and coerces the value.
+    private static FilterGroupDto? BuildDatasetFilterGroup(IReadOnlyDictionary<string, string> filters)
+    {
+        if (filters.Count == 0) return null;
+        var items = new List<FilterItemDto>(filters.Count);
+        foreach (var (column, value) in filters)
+        {
+            items.Add(new FilterConditionDto(
+                Id: column,
+                Kind: "condition",
+                TableName: string.Empty,
+                ColumnName: column,
+                Operator: "=",
+                Value: JsonSerializer.SerializeToElement(value)));
+        }
+        return new FilterGroupDto("root", "group", "AND", items);
+    }
+
+    private static List<DatasetSortDto>? BuildDatasetSort(IReadOnlyList<DynamicQueryBuilder.SortParam> sorts) =>
+        sorts.Count == 0
+            ? null
+            : sorts.Select(s => new DatasetSortDto(s.Column, s.Direction)).ToList();
+
+    // Auth-scope column for the dataset path: the version's AuthFilterFieldKey passed straight
+    // through (the dataset service validates it against the VIEW and binds the server-resolved
+    // user id as the value). Fail-closed: if the dataset lacks the column the service returns
+    // 422 rather than leaking every row.
+    private static string? NormalizeDatasetAuthColumn(string? authFilterFieldKey) =>
+        string.IsNullOrWhiteSpace(authFilterFieldKey) ? null : authFilterFieldKey.Trim();
+
+    // Serves one level of a dataset-backed TreeView from the dataset VIEW. Rows come back keyed
+    // by column name; the node id is the chosen keyField column (the SPA maps it to "id" so
+    // expand / select / CRUD-by-id keep working). `_has_children` is computed by the query.
+    private static async Task<IResult> ListTreeNodesFromDatasetAsync(
+        Guid datasetId,
+        string keyField,
+        string parentField,
+        string? parentId,
+        int page,
+        int pageSize,
+        string? search,
+        string? authFilterColumn,
+        HttpContext httpContext,
+        IDatasetRowQueryService datasetRowQueryService,
+        CancellationToken ct)
+    {
+        var request = new DatasetTreeLevelRequest(
+            KeyColumn: keyField,
+            ParentColumn: parentField,
+            ParentId: string.IsNullOrWhiteSpace(parentId) ? null : parentId.Trim(),
+            Search: search,
+            Page: page,
+            PageSize: pageSize,
+            AuthFilterColumn: NormalizeDatasetAuthColumn(authFilterColumn));
+
+        Guid? authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var uid)
+            ? uid : null;
+
+        var result = await datasetRowQueryService.GetTreeLevelAsync(datasetId, request, ct, authUserId)
+            .ConfigureAwait(false);
+
+        switch (result.Outcome)
+        {
+            case DatasetRowsOutcome.Success:
+                var lvl = result.Page!;
+                var records = lvl.Data
+                    .Select(row => new DynamicRecord(
+                        row.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal)))
+                    .ToList();
+                return Results.Ok(new TreeLevelResult(records, lvl.HasNextPage, lvl.Page, lvl.PageSize));
+            case DatasetRowsOutcome.NotFound:
+                return Problems.TableNotProvisioned();
+            default:
+                return Problems.ValidationFailed(result.ErrorDetail ?? "Invalid dataset tree query.");
+        }
+    }
+
+    // Serves the paged record list from a bound dataset's VIEW. The rows come back keyed by
+    // column name (the id is exposed as "<designerId>_id" per the dataset convention); they
+    // are wrapped in DynamicRecord so system columns serialize to camelCase exactly as the
+    // dynamic-table path does. The SPA maps "<designerId>_id" to "id" for update/delete.
+    private static async Task<IResult> ListRecordsFromDatasetAsync(
+        Guid datasetId,
+        IReadOnlyList<DynamicQueryBuilder.SortParam> sorts,
+        IReadOnlyDictionary<string, string> filters,
+        int page,
+        int pageSize,
+        string? authFilterFieldKey,
+        HttpContext httpContext,
+        IDatasetRowQueryService datasetRowQueryService,
+        CancellationToken ct)
+    {
+        var request = new DatasetRowsRequest(
+            Filters: BuildDatasetFilterGroup(filters),
+            Sort: BuildDatasetSort(sorts),
+            Columns: null,
+            Page: page,
+            PageSize: pageSize,
+            AuthFilterColumn: NormalizeDatasetAuthColumn(authFilterFieldKey));
+
+        Guid? authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var uid)
+            ? uid : null;
+
+        var result = await datasetRowQueryService.GetRowsAsync(datasetId, request, ct, authUserId)
+            .ConfigureAwait(false);
+
+        switch (result.Outcome)
+        {
+            case DatasetRowsOutcome.Success:
+                var dataPage = result.Page!;
+                var records = dataPage.Data
+                    .Select(row => new DynamicRecord(
+                        row.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal)))
+                    .ToList();
+                return Results.Ok(new PagedResult<DynamicRecord>(
+                    records, dataPage.Total, dataPage.Page, dataPage.PageSize));
+            case DatasetRowsOutcome.NotFound:
+                // The bound dataset was deleted out from under the binding — treat the source
+                // as unavailable rather than surfacing a 500.
+                return Problems.TableNotProvisioned();
+            default:
+                return Problems.ValidationFailed(result.ErrorDetail ?? "Invalid dataset query.");
+        }
+    }
+
+    // Streams an export from the bound dataset's VIEW (same source/scoping as the list), so
+    // the file matches what the user sees on screen. All VIEW columns are exported in ordinal
+    // order with the column names as headers.
+    private static async Task<IResult> ExportRecordsFromDatasetAsync(
+        Guid datasetId,
+        IReadOnlyList<DynamicQueryBuilder.SortParam> sorts,
+        IReadOnlyDictionary<string, string> filters,
+        string? authFilterFieldKey,
+        string title,
+        Func<Export.IRecordExportWriter> writerFactory,
+        HttpContext httpContext,
+        IDatasetRowQueryService datasetRowQueryService,
+        CancellationToken ct)
+    {
+        var request = new DatasetExportRequest(
+            Filters: BuildDatasetFilterGroup(filters),
+            Sort: BuildDatasetSort(sorts),
+            Columns: null,
+            AuthFilterColumn: NormalizeDatasetAuthColumn(authFilterFieldKey));
+
+        Guid? authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var uid)
+            ? uid : null;
+
+        var result = await datasetRowQueryService.GetExportAsync(datasetId, request, ct, authUserId)
+            .ConfigureAwait(false);
+
+        switch (result.Outcome)
+        {
+            case DatasetExportOutcome.Success:
+                var data = result.Data!;
+                var writer = writerFactory();
+                var fileName = $"{SanitizeFileNameSegment(title)}.{writer.FileExtension}";
+                using (var ms = new MemoryStream())
+                {
+                    await writer.WriteAsync(ms, title, data.Headers, data.Rows, ct).ConfigureAwait(false);
+                    return Results.File(
+                        fileContents: ms.ToArray(),
+                        contentType: writer.ContentType,
+                        fileDownloadName: fileName);
+                }
+            case DatasetExportOutcome.NotFound:
+                return Problems.TableNotProvisioned();
+            case DatasetExportOutcome.TooManyRows:
+                return Problems.ValidationFailed(result.ErrorDetail ?? "Export result set is too large.");
+            default:
+                return Problems.ValidationFailed(result.ErrorDetail ?? "Invalid dataset export.");
+        }
+    }
 
     // Forces filters[authFilterFieldKey] = current user id when the version names a
     // valid user column for the auth filter. Returns the input unchanged when no

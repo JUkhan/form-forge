@@ -8,6 +8,7 @@ import {
   createTreeNode,
   listTreeDescendantIds,
   type TreeNode,
+  type TreeDatasetSource,
 } from '@/features/data-entry/treeApi'
 import { updateRecord } from '@/features/data-entry/updateRecordApi'
 import { deleteRecord } from '@/features/data-entry/deleteRecordApi'
@@ -146,6 +147,16 @@ function TreeViewInteractive({
     typeof p.authFilterColumn === 'string' && p.authFilterColumn.trim() !== ''
       ? p.authFilterColumn.trim()
       : undefined
+  // Dataset-backed tree: active only when a dataset and BOTH column mappings are set.
+  // The levels then read from the dataset VIEW; mutations still write the row form's table.
+  const datasetSource = useMemo<TreeDatasetSource | undefined>(() => {
+    const datasetId = String(p.optionsDatasetId ?? '').trim()
+    const keyField = String(p.datasetKeyField ?? '').trim()
+    const parentField = String(p.datasetParentField ?? '').trim()
+    return datasetId !== '' && keyField !== '' && parentField !== ''
+      ? { datasetId, keyField, parentField }
+      : undefined
+  }, [p.optionsDatasetId, p.datasetKeyField, p.datasetParentField])
   const bindTo = getFieldKey(p)
   const onChange = interactiveProps?.onChange
   const radioName = useId()
@@ -265,6 +276,7 @@ function TreeViewInteractive({
             selection={selection}
             pageSize={pageSize}
             authFilterColumn={authFilterColumn}
+            datasetSource={datasetSource}
             reloadSignal={rootReload}
             onError={notifyError}
           />
@@ -314,6 +326,7 @@ function SearchableLevel({
   selection,
   pageSize,
   authFilterColumn,
+  datasetSource,
   reloadSignal,
   onError,
 }: {
@@ -326,6 +339,7 @@ function SearchableLevel({
   selection: TreeSelection
   pageSize: number
   authFilterColumn: string | undefined
+  datasetSource: TreeDatasetSource | undefined
   reloadSignal: number
   onError: (message: string) => void
 }) {
@@ -354,6 +368,7 @@ function SearchableLevel({
           pageSize,
           search,
           authFilterColumn,
+          dataset: datasetSource,
         })
         setRows((prev) => (replace ? res.rows : [...prev, ...res.rows]))
         setPage(targetPage)
@@ -365,7 +380,7 @@ function SearchableLevel({
         setLoading(false)
       }
     },
-    [designerId, parentId, pageSize, search, authFilterColumn, onError],
+    [designerId, parentId, pageSize, search, authFilterColumn, datasetSource, onError],
   )
 
   // (Re)load page 1 whenever the committed search or the reload signal changes.
@@ -419,6 +434,7 @@ function SearchableLevel({
               selection={selection}
               pageSize={pageSize}
               authFilterColumn={authFilterColumn}
+              datasetSource={datasetSource}
               onSelfChanged={reloadThisLevel}
               onError={onError}
             />
@@ -452,6 +468,7 @@ function TreeNodeRow({
   selection,
   pageSize,
   authFilterColumn,
+  datasetSource,
   onSelfChanged,
   onError,
 }: {
@@ -464,6 +481,7 @@ function TreeNodeRow({
   selection: TreeSelection
   pageSize: number
   authFilterColumn: string | undefined
+  datasetSource: TreeDatasetSource | undefined
   onSelfChanged: () => void
   onError: (message: string) => void
 }) {
@@ -501,13 +519,13 @@ function TreeNodeRow({
   const handleMultiToggle = useCallback(() => {
     if (selection.selectAll && hasChildren) {
       const willSelect = !selection.selected.has(id)
-      listTreeDescendantIds(designerId, id, authFilterColumn)
+      listTreeDescendantIds(designerId, id, authFilterColumn, datasetSource)
         .then((desc) => selection.setMany([id, ...desc], willSelect))
         .catch((e: unknown) => onError(errMessage(e)))
     } else {
       selection.toggle(id)
     }
-  }, [selection, hasChildren, id, designerId, authFilterColumn, onError])
+  }, [selection, hasChildren, id, designerId, authFilterColumn, datasetSource, onError])
 
   return (
     <li>
@@ -609,6 +627,7 @@ function TreeNodeRow({
           selection={selection}
           pageSize={pageSize}
           authFilterColumn={authFilterColumn}
+          datasetSource={datasetSource}
           reloadSignal={childReload}
           onError={onError}
         />

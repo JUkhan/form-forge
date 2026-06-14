@@ -357,20 +357,37 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
+        IDatasetRowQueryService datasetRowQueryService,
         CancellationToken ct,
         string? parentId = null,
         int page = 1,
         int pageSize = 25,
         string? search = null,
-        string? authFilterColumn = null)
+        string? authFilterColumn = null,
+        // Dataset-backed TreeView: when datasetId + keyField + parentField are supplied,
+        // the level is read from the dataset VIEW (keyField = node id, parentField = self
+        // reference) instead of the provisioned table. Mutations still hit the base table.
+        string? datasetId = null,
+        string? keyField = null,
+        string? parentField = null)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(db);
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(datasetRowQueryService);
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
+
+        if (Guid.TryParse(datasetId, out var treeDatasetId)
+            && !string.IsNullOrWhiteSpace(keyField)
+            && !string.IsNullOrWhiteSpace(parentField))
+        {
+            return await ListTreeNodesFromDatasetAsync(
+                treeDatasetId, keyField!.Trim(), parentField!.Trim(), parentId, page, pageSize,
+                search, authFilterColumn, httpContext, datasetRowQueryService, ct).ConfigureAwait(false);
+        }
 
         Guid? parentGuid = null;
         if (!string.IsNullOrWhiteSpace(parentId))
@@ -445,17 +462,43 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
+        IDatasetRowQueryService datasetRowQueryService,
         CancellationToken ct,
         string? parentId = null,
-        string? authFilterColumn = null)
+        string? authFilterColumn = null,
+        string? datasetId = null,
+        string? keyField = null,
+        string? parentField = null)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(db);
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(datasetRowQueryService);
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
+
+        // Dataset-backed tree: descendant key values come from the dataset VIEW (recursive).
+        if (Guid.TryParse(datasetId, out var treeDatasetId)
+            && !string.IsNullOrWhiteSpace(keyField)
+            && !string.IsNullOrWhiteSpace(parentField))
+        {
+            if (string.IsNullOrWhiteSpace(parentId))
+                return Problems.ValidationFailed("Query parameter 'parentId' is required.");
+            var authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var duid)
+                ? duid : (Guid?)null;
+            var dResult = await datasetRowQueryService.GetTreeDescendantsAsync(
+                treeDatasetId, keyField!.Trim(), parentField!.Trim(), parentId.Trim(),
+                NormalizeDatasetAuthColumn(authFilterColumn), ct, authUserId).ConfigureAwait(false);
+            return dResult.Outcome switch
+            {
+                DatasetRowsOutcome.Success => Results.Ok(new TreeDescendantsResult(dResult.Ids ?? Array.Empty<string>())),
+                DatasetRowsOutcome.NotFound => Results.Ok(new TreeDescendantsResult(Array.Empty<string>())),
+                _ => Problems.ValidationFailed(dResult.ErrorDetail ?? "Invalid dataset tree query."),
+            };
+        }
+
         if (string.IsNullOrWhiteSpace(parentId)
             || !Guid.TryParse(parentId, CultureInfo.InvariantCulture, out var parentGuid))
             return Problems.ValidationFailed("Query parameter 'parentId' is required and must be a UUID.");
@@ -2670,6 +2713,53 @@ internal static class DynamicDataEndpoints
     // 422 rather than leaking every row.
     private static string? NormalizeDatasetAuthColumn(string? authFilterFieldKey) =>
         string.IsNullOrWhiteSpace(authFilterFieldKey) ? null : authFilterFieldKey.Trim();
+
+    // Serves one level of a dataset-backed TreeView from the dataset VIEW. Rows come back keyed
+    // by column name; the node id is the chosen keyField column (the SPA maps it to "id" so
+    // expand / select / CRUD-by-id keep working). `_has_children` is computed by the query.
+    private static async Task<IResult> ListTreeNodesFromDatasetAsync(
+        Guid datasetId,
+        string keyField,
+        string parentField,
+        string? parentId,
+        int page,
+        int pageSize,
+        string? search,
+        string? authFilterColumn,
+        HttpContext httpContext,
+        IDatasetRowQueryService datasetRowQueryService,
+        CancellationToken ct)
+    {
+        var request = new DatasetTreeLevelRequest(
+            KeyColumn: keyField,
+            ParentColumn: parentField,
+            ParentId: string.IsNullOrWhiteSpace(parentId) ? null : parentId.Trim(),
+            Search: search,
+            Page: page,
+            PageSize: pageSize,
+            AuthFilterColumn: NormalizeDatasetAuthColumn(authFilterColumn));
+
+        Guid? authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var uid)
+            ? uid : null;
+
+        var result = await datasetRowQueryService.GetTreeLevelAsync(datasetId, request, ct, authUserId)
+            .ConfigureAwait(false);
+
+        switch (result.Outcome)
+        {
+            case DatasetRowsOutcome.Success:
+                var lvl = result.Page!;
+                var records = lvl.Data
+                    .Select(row => new DynamicRecord(
+                        row.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal)))
+                    .ToList();
+                return Results.Ok(new TreeLevelResult(records, lvl.HasNextPage, lvl.Page, lvl.PageSize));
+            case DatasetRowsOutcome.NotFound:
+                return Problems.TableNotProvisioned();
+            default:
+                return Problems.ValidationFailed(result.ErrorDetail ?? "Invalid dataset tree query.");
+        }
+    }
 
     // Serves the paged record list from a bound dataset's VIEW. The rows come back keyed by
     // column name (the id is exposed as "<designerId>_id" per the dataset convention); they

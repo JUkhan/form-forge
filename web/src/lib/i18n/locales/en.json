@@ -1056,6 +1056,10 @@
         "isMultiSelect": "Is multi-select",
         "viewMode": "View mode",
         "selectAll": "All select",
+        "treeViewDataset": "Dataset source",
+        "treeViewDatasetNone": "No dataset (use this component's table)",
+        "treeViewDatasetKeyField": "Node id column",
+        "treeViewDatasetParentField": "Parent id column",
         "authFilterColumn": "Auth filter column"
       },
       "options": {
@@ -1118,6 +1122,7 @@
         "datasetsLoadError": "Failed to load datasets",
         "datasetsEmpty": "No datasets available",
         "datasetsSelect": "Select a dataset…",
+        "datasetColumnSelect": "Select a column…",
         "datasetFieldsFirst": "Select a dataset first",
         "datasetColumnsEmpty": "Dataset has no columns",
         "datasetNoFilterInputs": "Add a filter input first",
@@ -1158,6 +1163,7 @@
         "singleRecordAuthFilterColumn": "Required. The column that owns the record per user — it is stamped with the current user on the server and hidden on the form. Each user reads/edits only their own single record scoped by this column.",
         "treeViewFieldKey": "In view/select mode, the selected node ids are stored here (comma-separated) on the host form's record.",
         "treeViewPageSize": "How many child nodes load per page when expanding a node. A search box and pager appear when a level has more.",
+        "treeViewDataset": "Optional. Back the tree with a dataset: its rows feed the hierarchical levels, paging and search, and its columns populate the Repeater Field pickers. Pick which dataset column is the node id and which is the parent reference. Add/edit/delete still write to the row form's table by id. Leave empty to use this component's own table.",
         "treeViewMutualExclusion": "Create/Edit/Delete and multi-select are mutually exclusive — turning one on clears the other.",
         "treeViewViewMode": "Read-only browse. Disables add/edit/delete AND selection — users can only expand and search the tree.",
         "treeViewSelectAll": "Checking a node also selects its entire subtree (all descendants).",

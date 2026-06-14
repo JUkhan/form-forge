@@ -61,6 +61,15 @@ export interface DesignerElementProperties {
   // per user. Stamped with the current user on create (server-side) and the field is
   // hidden on the form; reads/edits/deletes are scoped so each user only sees their own.
   authFilterColumn?: string
+  // Dataset-backed TreeView (optional). When `optionsDatasetId` is set, the tree's
+  // hierarchical levels, per-level paging and search are read from that dataset's VIEW
+  // instead of the provisioned table, and the RepeaterField pickers list the dataset's
+  // columns. `datasetKeyField` / `datasetParentField` name the VIEW columns that act as
+  // the node id and the parent self-reference. The chosen key value is mapped back to
+  // `id` so per-node open/edit/delete (on the base table) keep working.
+  optionsDatasetId?: string
+  datasetKeyField?: string
+  datasetParentField?: string
   // Allow arbitrary properties
   [key: string]: unknown
 }

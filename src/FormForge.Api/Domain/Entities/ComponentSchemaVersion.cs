@@ -21,6 +21,15 @@ internal sealed class ComponentSchemaVersion
     // this on demand from the Component Library, per designer version.
     public string? AuthFilterFieldKey { get; set; }
 
+    // Optional per-version dataset binding. When set, it references a CustomDataset
+    // (by its id). The record-list endpoint then reads its rows from that dataset's
+    // backing VIEW — applying the same pagination / filtering / sorting / auth-filter
+    // — instead of the provisioned dynamic table. The dataset's columns follow the
+    // fieldKey convention and expose the record id as "<designerId>_id". Null means
+    // no dataset — the table behaves as before. Admin sets this on demand from the
+    // Component Library, per designer version.
+    public Guid? DatasetId { get; set; }
+
     public Guid? CreatedBy { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? PublishedAt { get; set; }

@@ -92,6 +92,19 @@ export const designerApi = {
       { authFilterFieldKey },
     ),
 
+  // Sets (or clears, with null) the per-version dataset binding. The backend
+  // validates that the id references an existing dataset and returns the updated
+  // single-version DTO. When set, the record list reads from the dataset's VIEW.
+  setDataset: (
+    designerId: string,
+    version: number,
+    datasetId: string | null,
+  ) =>
+    httpClient.put<ComponentSchemaDto>(
+      `/api/designers/${designerId}/versions/${version}/dataset`,
+      { datasetId },
+    ),
+
   duplicateSchema: (designerId: string) =>
     httpClient.post<ComponentSchemaDto>(
       `/api/designers/${designerId}/duplicate`,

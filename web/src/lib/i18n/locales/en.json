@@ -812,7 +812,8 @@
     "duplicateConflict": "Too many copies of this designer exist. Rename one and try again.",
     "duplicateIdTooLong": "Designer ID is too long to duplicate. Rename it first.",
     "viewReferenceRejected": "A VIEW-mode component cannot be used as a data source.",
-    "authFilterFieldKeyInvalid": "The selected field is not part of this designer version."
+    "authFilterFieldKeyInvalid": "The selected field is not part of this designer version.",
+    "datasetBindingInvalid": "The selected dataset does not exist."
   },
   "designer": {
     "nav": {
@@ -892,7 +893,18 @@
       "authFilterEmpty": "No fields on this version.",
       "authFilterLoadError": "Could not load this version's fields.",
       "authFilterSuccess": "Auth filter updated.",
-      "authFilterError": "Could not update auth filter. Try again."
+      "authFilterError": "Could not update auth filter. Try again.",
+      "datasetSetup": "Dataset set up (v{{version}})",
+      "datasetTitle": "Dataset — v{{version}}",
+      "datasetDescription": "Bind this version to a dataset. When set, the record list, filtering, sorting and export all read from the dataset instead of this component's own table.\n\nConvention: the dataset must expose one column per fieldKey on this version (same names), plus the record id as “{{idColumn}}” — that id is required to open, update or delete a row. Leave as “No dataset” to use this component's own table.",
+      "datasetFieldLabel": "Dataset",
+      "datasetNone": "No dataset",
+      "datasetMissing": "Current dataset (no longer available)",
+      "datasetSearchPlaceholder": "Search datasets…",
+      "datasetEmpty": "No datasets found.",
+      "datasetLoadError": "Could not load the dataset list.",
+      "datasetSuccess": "Dataset binding updated.",
+      "datasetError": "Could not update the dataset binding. Try again."
     },
     "toolbar": {
       "structuralHeader": "Containers",

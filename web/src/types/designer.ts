@@ -120,6 +120,14 @@ export interface ComponentSchemaDto {
    * field is hidden by DynamicComponent. Admin-managed from the Component Library.
    */
   authFilterFieldKey?: string | null
+  /**
+   * Optional per-version dataset binding (the CustomDataset id, null when none).
+   * When set, the record list reads its rows from that dataset's backing VIEW
+   * (paginated/filtered/sorted/auth-scoped the same way) instead of the
+   * provisioned table. The dataset's columns follow the fieldKey convention and
+   * expose the record id as `<designerId>_id`. Admin-managed from the Component Library.
+   */
+  datasetId?: string | null
   versions?: ComponentSchemaVersion[]
 }
 

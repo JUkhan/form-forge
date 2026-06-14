@@ -206,6 +206,7 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
             e.Property(v => v.Status).HasColumnName("status").IsRequired().HasDefaultValue("Draft").HasMaxLength(20);
             e.Property(v => v.RootElement).HasColumnName("root_element").HasColumnType("jsonb");
             e.Property(v => v.AuthFilterFieldKey).HasColumnName("auth_filter_field_key").HasMaxLength(63);
+            e.Property(v => v.DatasetId).HasColumnName("dataset_id");
             e.Property(v => v.CreatedBy).HasColumnName("created_by");
             e.Property(v => v.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
             e.Property(v => v.PublishedAt).HasColumnName("published_at");

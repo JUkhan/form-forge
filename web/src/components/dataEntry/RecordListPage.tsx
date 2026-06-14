@@ -86,12 +86,6 @@ function nextSortForClick(
   return current.filter((e) => e.key !== colKey)
 }
 
-function formatTimestamp(value: unknown): string {
-  if (typeof value !== 'string' || value === '') return '—'
-  const d = new Date(value)
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleString()
-}
-
 function formatCell(value: unknown): string {
   if (value === null || value === undefined) return '—'
   if (typeof value === 'object') return JSON.stringify(value)
@@ -700,36 +694,6 @@ export function RecordListPage({
                         )}
                       </th>
                     ))}
-                    <th
-                      className="px-3 py-3"
-                      aria-sort={ariaSortFor('created_at', sortEntries)}
-                    >
-                      <SortableHeader
-                        colKey="created_at"
-                        label={t('data.entry.columnCreatedAt')}
-                        sortEntries={sortEntries}
-                        multi={multi}
-                        onSortChange={onSortChange}
-                        ariaSortAscLabel={sortAscLabel}
-                        ariaSortDescLabel={sortDescLabel}
-                        ariaPriorityLabelFor={ariaPriorityLabelFor}
-                      />
-                    </th>
-                    <th
-                      className="px-3 py-3"
-                      aria-sort={ariaSortFor('updated_at', sortEntries)}
-                    >
-                      <SortableHeader
-                        colKey="updated_at"
-                        label={t('data.entry.columnUpdatedAt')}
-                        sortEntries={sortEntries}
-                        multi={multi}
-                        onSortChange={onSortChange}
-                        ariaSortAscLabel={sortAscLabel}
-                        ariaSortDescLabel={sortDescLabel}
-                        ariaPriorityLabelFor={ariaPriorityLabelFor}
-                      />
-                    </th>
                     {effectiveShowDeleted && (
                       <th className="px-3 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                         {t('data.entry.columnActions')}
@@ -744,7 +708,7 @@ export function RecordListPage({
                       ariaFilterLabelFor={ariaFilterLabelFor}
                       onFilterChange={onFilterChange}
                       onPageChange={onPageChange}
-                      trailingColCount={effectiveShowDeleted ? 3 : 2}
+                      trailingColCount={effectiveShowDeleted ? 1 : 0}
                     />
                   )}
                 </thead>
@@ -752,11 +716,10 @@ export function RecordListPage({
                   {rows.length === 0 ? (
                     // Filter active but no matches — keep the chrome mounted
                     // so the user can adjust or clear filters from where they
-                    // are. Colspan = user columns + created_at + updated_at
-                    // (+ actions when 'Show deleted' is on).
+                    // are. Colspan = user columns (+ actions when 'Show deleted' is on).
                     <tr>
                       <td
-                        colSpan={columns.length + (effectiveShowDeleted ? 3 : 2)}
+                        colSpan={columns.length + (effectiveShowDeleted ? 1 : 0)}
                         className="px-3 py-10 text-center text-sm text-muted-foreground"
                       >
                         <div className="flex flex-col items-center gap-3">
@@ -779,8 +742,8 @@ export function RecordListPage({
                     const deleted = row.isDeleted === true
                     const cellMuted = deleted ? 'text-muted-foreground line-through' : 'text-foreground'
                     // Soft-deleted badge, relocated here from the removed id
-                    // column; rendered in the first data cell (or created_at
-                    // when the schema exposes no user columns).
+                    // column; rendered in the first data cell (or the actions
+                    // cell when the schema exposes no user columns).
                     const deletedBadge = deleted ? (
                       <span className="mr-1.5 inline-flex items-center rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-destructive">
                         {t('data.entry.deletedBadge')}
@@ -814,15 +777,11 @@ export function RecordListPage({
                             </td>
                           )
                         })}
-                        <td className={cn('whitespace-nowrap px-3 py-2 text-muted-foreground', deleted && 'line-through text-muted-foreground')}>
-                          {columns.length === 0 && deletedBadge}
-                          {formatTimestamp(row.createdAt)}
-                        </td>
-                        <td className={cn('whitespace-nowrap px-3 py-2 text-muted-foreground', deleted && 'line-through text-muted-foreground')}>
-                          {formatTimestamp(row.updatedAt)}
-                        </td>
                         {effectiveShowDeleted && (
                           <td className="whitespace-nowrap px-3 py-2 text-right">
+                            {/* When the schema exposes no user columns, this is the
+                                only cell left to host the soft-deleted badge. */}
+                            {columns.length === 0 && deletedBadge}
                             {deleted && canDelete && (
                               <Button
                                 type="button"

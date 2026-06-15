@@ -163,6 +163,23 @@ internal static class DynamicDataEndpoints
              .RequirePermission("update")
              .RequireRateLimiting("data-write");
 
+        // Hard delete — DELETE /api/data/{designerId}/{id}/hard-delete. Permanently
+        // removes a (previously soft-deleted) record AND its whole descendant subtree
+        // (Repeater children, TreeView nodes) from the database, walking the cascade in
+        // application code so it works even when no DB FK constraint / ON DELETE CASCADE
+        // exists. The literal "/hard-delete" segment is more specific than the bare
+        // "/{id:guid}" DELETE, so routing picks this handler. RequirePermission("delete")
+        // covers the CRUD flag; the handler additionally requires platform-admin because
+        // this is an irreversible purge offered only in the admin "Show deleted" view.
+        group.MapDelete("/{id:guid}/hard-delete", HardDeleteRecordHandler)
+             .WithSummary("Permanently delete a soft-deleted record and its cascade descendants (admin only).")
+             .Produces<DynamicRecord>(StatusCodes.Status200OK)
+             .Produces<ProblemDetails>(StatusCodes.Status403Forbidden)
+             .Produces<ProblemDetails>(StatusCodes.Status404NotFound)
+             .Produces<ProblemDetails>(StatusCodes.Status422UnprocessableEntity)
+             .RequirePermission("delete")
+             .RequireRateLimiting("data-write");
+
         // SingleRecord component — GET /api/data/{designerId}/single?authFilterColumn=col.
         // Returns the ONE record owned by the requesting user (the row whose
         // authFilterColumn equals the JWT user id), or 204 No Content when the user has
@@ -2526,6 +2543,212 @@ internal static class DynamicDataEndpoints
         return Results.Ok(new DynamicRecord(existingRow));
     }
 
+    // Hard delete — DELETE /api/data/{designerId}/{id}/hard-delete. Permanently removes
+    // a record and its entire descendant subtree from the database. Mirrors
+    // DeleteRecordHandler's resolution + cascade-graph preamble (SafeIdentifier → bound
+    // version → registry → self-ref-tree detection → BuildSchemaGraphAsync), then:
+    //   1. Enforces platform-admin (defence in depth — the UI only exposes hard delete
+    //      to admins; RequirePermission("delete") alone is not enough for this purge).
+    //   2. SELECTs the parent row (existence check → 404; must be soft-deleted first
+    //      → 422 RECORD_NOT_SOFT_DELETED, matching the trash → empty-trash UX).
+    //   3. Inside ONE NpgsqlTransaction: cascade-hard-deletes all descendants bottom-up
+    //      (SoftDeleteCascade.ExecuteHardDeleteAsync), then deletes the parent row last.
+    //   4. Appends a HARD_DELETE mutation_audit_log row via EF (Decision 1.6 separate
+    //      transaction). The audit trail outlives the purged data row.
+    //   5. Returns 200 with the last-known parent record snapshot (overlay pattern).
+    internal static async Task<IResult> HardDeleteRecordHandler(
+        string designerId,
+        Guid id,
+        HttpContext httpContext,
+        FormForgeDbContext db,
+        ISchemaRegistry schemaRegistry,
+        DbConnectionFactory connectionFactory,
+        IPermissionService permissionService,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(schemaRegistry);
+        ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(permissionService);
+
+        if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
+            return Problems.ValidationFailed("Invalid designer identifier.");
+
+        // Admin gate — permanent purge is an admin-only capability (matches the
+        // admin-only "Show deleted" view that surfaces the button). Checked before any
+        // table read so a non-admin never learns whether the record exists.
+        if (!await IsPlatformAdminAsync(httpContext, permissionService, ct).ConfigureAwait(false))
+            return Problems.PlatformAdminRequired();
+
+        var boundVersion = await ResolveEffectiveVersionAsync(db, safeId!.Value, ct).ConfigureAwait(false);
+
+        if (boundVersion is null)
+            return Problems.TableNotProvisioned();
+
+        var entry = schemaRegistry.TryGet(safeId!.Value, boundVersion.Value);
+        if (entry is null)
+        {
+            var rootElementJson = await db.ComponentSchemaVersions
+                .AsNoTracking()
+                .Where(v => v.DesignerId == safeId.Value && v.Version == boundVersion.Value)
+                .Select(v => v.RootElement)
+                .FirstOrDefaultAsync(ct)
+                .ConfigureAwait(false);
+            var (columns, childIds, derivedColumns) = RootElementParser.ParseWithDerived(rootElementJson);
+            entry = new SchemaRegistryEntry(
+                safeId.Value, boundVersion.Value, columns, childIds, DateTimeOffset.UtcNow)
+            {
+                DerivedColumns = derivedColumns,
+            };
+            schemaRegistry.Populate(entry);
+        }
+
+        var actorId = httpContext.User.FindFirst("userId")?.Value is { } userIdStr
+            && Guid.TryParse(userIdStr, out var uid) ? uid : (Guid?)null;
+
+        IResult? earlyResult = null;
+        var existingRow = new Dictionary<string, object?>(StringComparer.Ordinal);
+
+        var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // Detect the TreeView self-FK (parent_<table>_id) and inject the self-edge so
+            // a node's whole subtree is purged — identical reasoning to DeleteRecordHandler.
+            var selfFkColumn = DynamicQueryBuilder.BuildFkColumnName(safeId!.Value);
+            var isSelfRefTree = await TableHasColumnAsync(conn, safeId!.Value, selfFkColumn, ct)
+                .ConfigureAwait(false);
+
+            IReadOnlyList<string> effectiveChildIds = entry.ChildRepeaterDesignerIds;
+            if (isSelfRefTree && !effectiveChildIds.Contains(safeId!.Value, StringComparer.Ordinal))
+                effectiveChildIds = new List<string>(entry.ChildRepeaterDesignerIds) { safeId!.Value };
+
+            var cascadeGraph = new Dictionary<string, SoftDeleteCascade.NodeInfo>(StringComparer.Ordinal);
+            if (effectiveChildIds.Count > 0)
+            {
+                await SoftDeleteCascade.BuildSchemaGraphAsync(
+                    effectiveChildIds, db, schemaRegistry, cascadeGraph, ct).ConfigureAwait(false);
+
+                if (isSelfRefTree)
+                {
+                    cascadeGraph.TryGetValue(safeId!.Value, out var selfNode);
+                    var selfChildIds = selfNode is null
+                        ? new List<string>()
+                        : new List<string>(selfNode.ChildIds);
+                    if (!selfChildIds.Contains(safeId!.Value, StringComparer.Ordinal))
+                        selfChildIds.Add(safeId!.Value);
+                    cascadeGraph[safeId!.Value] = new SoftDeleteCascade.NodeInfo(safeId!, selfChildIds);
+                }
+            }
+
+            // SELECT the parent row (existence check + is_deleted state check).
+            var (selectSql, selectParams) = DynamicQueryBuilder.BuildGetByIdQuery(
+                safeId, entry.Columns, id);
+            var rawRows = await conn.QueryAsync(new CommandDefinition(
+                selectSql, selectParams, commandTimeout: 5, cancellationToken: ct))
+                .ConfigureAwait(false);
+
+            var rows = rawRows
+                .Cast<IDictionary<string, object>>()
+                .Select(r => r.ToDictionary(
+                    kvp => kvp.Key, kvp => (object?)kvp.Value, StringComparer.Ordinal))
+                .ToList();
+
+            if (rows.Count == 0)
+            {
+                earlyResult = Problems.RecordNotFound();
+            }
+            else
+            {
+                existingRow = rows[0];
+
+                // Two-step safety: a record must be soft-deleted before it can be
+                // permanently purged (trash → empty-trash). The UI only shows the Hard
+                // delete button on soft-deleted rows, so this fires only on a direct API
+                // call or a race against a restore.
+                if (existingRow.TryGetValue("is_deleted", out var isDeletedVal) && isDeletedVal is not true)
+                {
+                    earlyResult = Problems.RecordNotSoftDeleted();
+                }
+                else
+                {
+                    // ONE transaction: cascade-delete every descendant bottom-up, then
+                    // delete the parent row last so an FK-without-CASCADE never blocks it.
+                    var tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        if (cascadeGraph.Count > 0)
+                        {
+                            var visitedDesigners = new HashSet<string>(StringComparer.Ordinal)
+                                { safeId!.Value };
+                            var visitedRows = new HashSet<Guid> { id };
+                            await SoftDeleteCascade.ExecuteHardDeleteAsync(
+                                safeId!.Value,
+                                effectiveChildIds,
+                                cascadeGraph, id,
+                                conn, tx, visitedDesigners, visitedRows, ct)
+                                .ConfigureAwait(false);
+                        }
+
+                        var (deleteSql, deleteParams) = DynamicQueryBuilder.BuildHardDeleteByIdQuery(safeId, id);
+                        var rowsAffected = await conn.ExecuteAsync(new CommandDefinition(
+                            deleteSql, deleteParams, transaction: tx,
+                            commandTimeout: 5, cancellationToken: ct))
+                            .ConfigureAwait(false);
+
+                        if (rowsAffected == 0)
+                        {
+                            // Parent raced away (e.g. a concurrent hard delete, or a
+                            // cascade purged it via a corrupt cyclic parent chain).
+                            await tx.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                            earlyResult = Problems.RecordNotFound();
+                        }
+                        else
+                        {
+                            await tx.CommitAsync(ct).ConfigureAwait(false);
+                        }
+                    }
+                    catch
+                    {
+                        // Rollback must complete even if the request was cancelled.
+                        await tx.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                        throw;
+                    }
+                    finally
+                    {
+                        await tx.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (earlyResult is not null) return earlyResult;
+
+        // Audit row via EF (Decision 1.6 separate transaction). HARD_DELETE has no
+        // field-level diff; the row records who purged what and when. previous_values is
+        // intentionally null (consistent with SOFT_DELETE / RESTORE).
+        db.MutationAuditLog.Add(new Domain.Entities.MutationAuditLogEntry
+        {
+            DesignerId     = safeId!.Value,
+            RecordId       = id,
+            Operation      = "HARD_DELETE",
+            ActorId        = actorId,
+            Timestamp      = DateTimeOffset.UtcNow,
+            NewValues      = null,
+            PreviousValues = null,
+            CorrelationId  = httpContext.GetCorrelationId(),
+        });
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+
+        // Return the last-known record snapshot (overlay isDeleted=true — it was a
+        // soft-deleted row). The client uses the 200 to confirm + drop it from the list.
+        return Results.Ok(new DynamicRecord(existingRow));
+    }
+
     // Resolves the schema version to use for a designer's provisioned table, or null
     // when the table is not provisioned (caller maps null → 404 TABLE_NOT_PROVISIONED).
     //
@@ -3122,6 +3345,34 @@ internal static class DynamicDataEndpoints
                 {
                     ["code"] = "CHILD_NOT_FOUND",
                     ["messageKey"] = "errors.childNotFound",
+                });
+
+        // Hard delete — the record exists but is not soft-deleted, so it cannot be
+        // permanently purged yet (trash → empty-trash two-step). Distinct messageKey
+        // from RECORD_NOT_DELETED (restore) so the client surfaces the right guidance.
+        internal static IResult RecordNotSoftDeleted() =>
+            Results.Problem(
+                detail: "Record must be soft-deleted before it can be permanently deleted.",
+                title: "Record is not soft-deleted",
+                statusCode: StatusCodes.Status422UnprocessableEntity,
+                extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["code"] = "RECORD_NOT_SOFT_DELETED",
+                    ["messageKey"] = "errors.recordNotSoftDeleted",
+                });
+
+        // Hard delete — caller has the per-designer "delete" flag but is not a platform
+        // admin. Same FORBIDDEN envelope shape as RequirePermission so the client's
+        // existing 403 handling applies unchanged.
+        internal static IResult PlatformAdminRequired() =>
+            Results.Problem(
+                detail: "Platform administrator role is required for this action.",
+                title: "Permission denied",
+                statusCode: StatusCodes.Status403Forbidden,
+                extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["code"] = "FORBIDDEN",
+                    ["messageKey"] = "errors.forbidden",
                 });
 
         internal static IResult ValidationFailed(string detail) =>

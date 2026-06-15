@@ -739,6 +739,66 @@ internal static class DynamicQueryBuilder
         return (sql, parameters);
     }
 
+    // Hard-delete — SELECT id of ALL children of a parent row (deleted or not),
+    // regardless of is_deleted. Unlike BuildSelectChildIdsByFkQuery (which filters
+    // is_deleted = false for the soft-delete cascade), a hard delete purges the whole
+    // subtree, so already-soft-deleted descendants must be collected too. fkColumnName
+    // is produced by BuildFkColumnName and is already a validated identifier.
+    internal static (string Sql, DynamicParameters Parameters) BuildSelectAllChildIdsByFkQuery(
+        SafeIdentifier childTableName,
+        string fkColumnName,
+        Guid parentId)
+    {
+        ArgumentNullException.ThrowIfNull(childTableName);
+        ArgumentException.ThrowIfNullOrEmpty(fkColumnName);
+
+        var sql = $"SELECT \"id\" FROM \"{childTableName.Value}\" " +
+                  $"WHERE \"{fkColumnName}\" = @p_parent_id";
+
+        var parameters = new DynamicParameters();
+        parameters.Add("p_parent_id", parentId);
+        return (sql, parameters);
+    }
+
+    // Hard-delete — physically DELETE every child row of a parent (deleted or not)
+    // within the cascade transaction. fkColumnName is produced by BuildFkColumnName.
+    // No is_deleted filter: a hard delete removes the entire subtree. Used during the
+    // bottom-up cascade walk so children are gone before the parent row is deleted,
+    // which keeps the operation valid even when a real FK constraint exists WITHOUT
+    // ON DELETE CASCADE.
+    internal static (string Sql, DynamicParameters Parameters) BuildHardDeleteChildrenByFkQuery(
+        SafeIdentifier childTableName,
+        string fkColumnName,
+        Guid parentId)
+    {
+        ArgumentNullException.ThrowIfNull(childTableName);
+        ArgumentException.ThrowIfNullOrEmpty(fkColumnName);
+
+        var sql = $"DELETE FROM \"{childTableName.Value}\" " +
+                  $"WHERE \"{fkColumnName}\" = @p_parent_id";
+
+        var parameters = new DynamicParameters();
+        parameters.Add("p_parent_id", parentId);
+        return (sql, parameters);
+    }
+
+    // Hard-delete — physically DELETE a single row by id. The caller checks the
+    // returned rows-affected: 0 means the row was raced away between SELECT and DELETE
+    // (caller maps to 404). Runs last in the cascade transaction, after all descendants
+    // have been removed.
+    internal static (string Sql, DynamicParameters Parameters) BuildHardDeleteByIdQuery(
+        SafeIdentifier tableName,
+        Guid id)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+
+        var sql = $"DELETE FROM \"{tableName.Value}\" WHERE \"id\" = @p_id";
+
+        var parameters = new DynamicParameters();
+        parameters.Add("p_id", id);
+        return (sql, parameters);
+    }
+
     // Story 6.7 — INSERT for child records in the Repeater nested-write flow.
     // Identical structure to BuildInsertQuery but inserts the FK column that links
     // the child to its parent. fkColumnName is produced by BuildFkColumnName(parentDesignerId).

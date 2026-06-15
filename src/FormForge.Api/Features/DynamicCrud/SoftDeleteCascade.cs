@@ -165,6 +165,90 @@ internal static class SoftDeleteCascade
         }
     }
 
+    // Hard-delete cascade walker. Mirrors ExecuteAsync's recursive descent and
+    // self-edge handling, but PHYSICALLY DELETES rows instead of soft-deleting and is
+    // NOT bounded by is_deleted — the entire subtree is purged, already-soft-deleted
+    // descendants included. Deletion is depth-first / bottom-up: a row's grandchildren
+    // are deleted before the row itself, so the cascade stays valid even when a real
+    // database FK constraint exists WITHOUT ON DELETE CASCADE (the whole point of this
+    // application-level walk: "ensure cascade deleting even if the DB constraints don't
+    // exist"). The parent row passed by the caller is NOT deleted here — the caller
+    // deletes it after this returns, so the parent is the very last row removed.
+    //
+    // Two cycle guards run together:
+    //   - `visitedDesigners` is the recursion-stack designer guard (same push/pop
+    //     semantics as ExecuteAsync) — defence in depth against multi-designer cycles,
+    //     which the bind-time CycleDetector already blocks. Self-edges are never
+    //     skipped (an adjacency-list tree legitimately recurs on one designer id).
+    //   - `visitedRows` guards against CYCLIC adjacency DATA (a corrupt parent chain
+    //     A→B→A). Unlike the soft-delete walk — whose is_deleted=false filter naturally
+    //     bounds self-edge recursion — a hard delete reads every row regardless of
+    //     is_deleted, so without a row guard a data cycle would recurse forever. A row
+    //     visited once is never recursed into again.
+    internal static async Task ExecuteHardDeleteAsync(
+        string parentDesignerId,
+        IReadOnlyList<string> directChildDesignerIds,
+        Dictionary<string, NodeInfo> graph,
+        Guid parentId,
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        HashSet<string> visitedDesigners,
+        HashSet<Guid> visitedRows,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(parentDesignerId);
+        ArgumentNullException.ThrowIfNull(directChildDesignerIds);
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(conn);
+        ArgumentNullException.ThrowIfNull(tx);
+        ArgumentNullException.ThrowIfNull(visitedDesigners);
+        ArgumentNullException.ThrowIfNull(visitedRows);
+
+        var fkColumnName = DynamicQueryBuilder.BuildFkColumnName(parentDesignerId);
+
+        foreach (var childDesignerId in directChildDesignerIds)
+        {
+            var isSelfEdge = string.Equals(childDesignerId, parentDesignerId, StringComparison.Ordinal);
+            if (!isSelfEdge && visitedDesigners.Contains(childDesignerId)) continue;
+            if (!graph.TryGetValue(childDesignerId, out var childNode)) continue;
+
+            // SELECT ALL child row ids (deleted or not) BEFORE deleting — these are the
+            // parents for the next recursion level.
+            var (selectSql, selectParams) = DynamicQueryBuilder.BuildSelectAllChildIdsByFkQuery(
+                childNode.TableName, fkColumnName, parentId);
+            var childRowIds = (await conn.QueryAsync<Guid>(new CommandDefinition(
+                selectSql, selectParams, transaction: tx,
+                commandTimeout: 5, cancellationToken: ct)).ConfigureAwait(false))
+                .ToList();
+
+            var addedToStack = visitedDesigners.Add(childDesignerId);
+            try
+            {
+                // Recurse FIRST so each child's own descendants are deleted before the
+                // child rows themselves are removed by the DELETE below (bottom-up).
+                foreach (var childRowId in childRowIds)
+                {
+                    if (!visitedRows.Add(childRowId)) continue;  // data-cycle guard
+                    await ExecuteHardDeleteAsync(
+                        childDesignerId, childNode.ChildIds, graph,
+                        childRowId, conn, tx, visitedDesigners, visitedRows, ct)
+                        .ConfigureAwait(false);
+                }
+
+                // Then delete all direct children of parentId in one statement.
+                var (deleteSql, deleteParams) = DynamicQueryBuilder.BuildHardDeleteChildrenByFkQuery(
+                    childNode.TableName, fkColumnName, parentId);
+                await conn.ExecuteAsync(new CommandDefinition(
+                    deleteSql, deleteParams, transaction: tx,
+                    commandTimeout: 5, cancellationToken: ct)).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (addedToStack) visitedDesigners.Remove(childDesignerId);
+            }
+        }
+    }
+
     // Story 6.6 — flat cascade-restore walker. Unlike ExecuteAsync (which recurses
     // per-row), this method iterates ALL nodes in the pre-loaded `graph` and issues
     // one UPDATE per child table, matching rows by cascade_event_id. No per-row

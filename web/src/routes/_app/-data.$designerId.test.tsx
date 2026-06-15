@@ -121,6 +121,17 @@ vi.mock('@/features/data-entry/useRestoreRecord', () => ({
   useRestoreRecord: () => ({ ...restoreMutationHandles }),
 }))
 
+// useHardDeleteRecord — per-row Hard delete button on RecordListPage (visible to
+// admins in the 'Show deleted' view). Stub returns a stable handle so existing
+// tests that don't trigger a hard delete need no configuration.
+const hardDeleteMutationHandles = vi.hoisted(() => ({
+  mutate: vi.fn(),
+  isPending: false,
+}))
+vi.mock('@/features/data-entry/useHardDeleteRecord', () => ({
+  useHardDeleteRecord: () => ({ ...hardDeleteMutationHandles }),
+}))
+
 // useDesignerFieldKeys — Story 6.10 supplies the user-column fieldKeys from
 // the bound designer schema. Tests configure the hoisted handle directly.
 const designerFieldKeysHandles = vi.hoisted(() => ({

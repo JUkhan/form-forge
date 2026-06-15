@@ -1242,7 +1242,9 @@
     "correlationId": "Correlation ID: {{id}}",
     "retry": "Retry",
     "invalidValue": "Invalid value",
-    "exportFailed": "Export failed. Please try again."
+    "exportFailed": "Export failed. Please try again.",
+    "recordNotSoftDeleted": "This record must be soft-deleted before it can be permanently deleted.",
+    "forbidden": "You don't have permission to perform this action."
   },
   "data": {
     "entry": {
@@ -1276,6 +1278,14 @@
       "restoreAria": "Restore deleted record",
       "restoreSuccess": "Record restored.",
       "restoreError": "Could not restore the record.",
+      "hardDelete": "Hard delete",
+      "hardDeleteAria": "Permanently delete record",
+      "hardDeleting": "Deleting…",
+      "hardDeleteConfirm": "Delete permanently",
+      "hardDeleteConfirmTitle": "Permanently delete this record?",
+      "hardDeleteConfirmDescription": "This permanently removes the record and all of its related rows (repeater items, tree nodes) from the database. This action cannot be undone.",
+      "hardDeleteSuccess": "Record permanently deleted.",
+      "hardDeleteError": "Could not permanently delete the record.",
       "permissionDenied": "You don't have permission to create records here.",
       "readOnly": "Read-only",
       "columnId": "ID",

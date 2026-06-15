@@ -16,9 +16,20 @@ import { downloadRecordExport, type ExportFormat } from '@/features/data-entry/e
 import { compileMapExpression, type CompiledMapExpression } from '@/features/data-entry/mapExpression'
 import { fetchDropdownOptions } from '@/features/data-entry/dropdownOptionsApi'
 import { useRestoreRecord } from '@/features/data-entry/useRestoreRecord'
+import { useHardDeleteRecord } from '@/features/data-entry/useHardDeleteRecord'
 import { ApiError } from '@/lib/api/apiError'
-import { Undo2 } from 'lucide-react'
+import { Undo2, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
@@ -506,6 +517,11 @@ export function RecordListPage({
   const canDelete = usePermission(designerId, 'canDelete')
   const canExport = usePermission(designerId, 'canExport')
   const restoreMutation = useRestoreRecord(designerId)
+  const hardDeleteMutation = useHardDeleteRecord(designerId)
+  // Id of the row awaiting hard-delete confirmation, or null when the dialog is
+  // closed. Hard delete is irreversible, so it goes through an AlertDialog rather
+  // than firing on the first click like Restore does.
+  const [hardDeleteTargetId, setHardDeleteTargetId] = useState<string | null>(null)
   // Export-in-flight flag — declared up here (before the early-return loading
   // / error branches) so the hook-call order is stable across renders.
   const [exporting, setExporting] = useState(false)
@@ -598,6 +614,28 @@ export function RecordListPage({
       onError: (err) => {
         const messageKey = err instanceof ApiError ? err.messageKey : 'data.entry.restoreError'
         toast.error(t(messageKey))
+      },
+    })
+  }
+
+  // Opens the confirmation dialog — the row click is stopped so it doesn't also
+  // navigate to the detail page. The actual purge runs from confirmHardDelete.
+  const handleHardDeleteClick = (recordId: string, event: React.MouseEvent) => {
+    event.stopPropagation()
+    setHardDeleteTargetId(recordId)
+  }
+
+  const confirmHardDelete = () => {
+    if (!hardDeleteTargetId) return
+    hardDeleteMutation.mutate(hardDeleteTargetId, {
+      onSuccess: () => {
+        toast.success(t('data.entry.hardDeleteSuccess'))
+        setHardDeleteTargetId(null)
+      },
+      onError: (err) => {
+        const messageKey = err instanceof ApiError ? err.messageKey : 'data.entry.hardDeleteError'
+        toast.error(t(messageKey))
+        setHardDeleteTargetId(null)
       },
     })
   }
@@ -783,17 +821,36 @@ export function RecordListPage({
                                 only cell left to host the soft-deleted badge. */}
                             {columns.length === 0 && deletedBadge}
                             {deleted && canDelete && (
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={(e) => handleRestore(row.id, e)}
-                                disabled={restoreMutation.isPending}
-                                aria-label={t('data.entry.restoreAria')}
-                              >
-                                <Undo2 className="h-3.5 w-3.5" />
-                                {t('data.entry.restore')}
-                              </Button>
+                              <div className="inline-flex items-center justify-end gap-2">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={(e) => handleRestore(row.id, e)}
+                                  disabled={restoreMutation.isPending}
+                                  aria-label={t('data.entry.restoreAria')}
+                                >
+                                  <Undo2 className="h-3.5 w-3.5" />
+                                  {t('data.entry.restore')}
+                                </Button>
+                                {/* Hard delete — irreversible purge, admin-only. The
+                                    actions column already renders only for admins (it
+                                    is gated on effectiveShowDeleted), but gate the
+                                    button explicitly too. Opens a confirm dialog. */}
+                                {isAdmin && (
+                                  <Button
+                                    type="button"
+                                    variant="destructive"
+                                    size="sm"
+                                    onClick={(e) => handleHardDeleteClick(row.id, e)}
+                                    disabled={hardDeleteMutation.isPending}
+                                    aria-label={t('data.entry.hardDeleteAria')}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                    {t('data.entry.hardDelete')}
+                                  </Button>
+                                )}
+                              </div>
                             )}
                           </td>
                         )}
@@ -845,6 +902,46 @@ export function RecordListPage({
           </Button>
         </nav>
       </div>
+
+      {/* Hard-delete confirmation. Controlled by hardDeleteTargetId so a single
+          dialog instance serves every row. Open state derives from the target id;
+          closing (cancel / overlay / escape) clears it. */}
+      <AlertDialog
+        open={hardDeleteTargetId !== null}
+        onOpenChange={(open) => {
+          if (!open) setHardDeleteTargetId(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('data.entry.hardDeleteConfirmTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('data.entry.hardDeleteConfirmDescription')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={hardDeleteMutation.isPending}>
+              {t('common.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className={cn(
+                'bg-destructive text-white hover:bg-destructive/90',
+              )}
+              // Keep the dialog open until the mutation resolves so the user sees
+              // the in-flight state; confirmHardDelete closes it on success/error.
+              onClick={(e) => {
+                e.preventDefault()
+                confirmHardDelete()
+              }}
+              disabled={hardDeleteMutation.isPending}
+            >
+              {hardDeleteMutation.isPending
+                ? t('data.entry.hardDeleting')
+                : t('data.entry.hardDeleteConfirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

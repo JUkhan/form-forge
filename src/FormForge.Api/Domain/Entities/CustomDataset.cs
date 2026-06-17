@@ -15,6 +15,18 @@ internal sealed class CustomDataset
     public string DatasetName { get; set; } = string.Empty;
 
     public bool IsCustomQuery { get; set; } = true;
+
+    // Dataset Manager parameterized-query feature — orthogonal to IsCustomQuery (which
+    // distinguishes Custom Query vs visual Query Builder). QueryType distinguishes how the
+    // dataset is materialized and used:
+    //   "view"  — the generated SQL is materialized as a VIEW in the `datasets` schema
+    //             (the original behaviour; Custom Query OR Query Builder).
+    //   "query" — the SQL is stored as a record only (NO backing VIEW). When the SQL
+    //             contains {_placeholder} tokens it is a *parameterized* query, usable only
+    //             by the designer's Dataset palette element. See DatasetQueryTypes.
+    // Stored as TEXT; defaults to "view" so every pre-existing row keeps its VIEW semantics.
+    public string QueryType { get; set; } = DatasetQueryTypes.View;
+
     public string? Query { get; set; }
 
     // jsonb — Query Builder state; null for custom-query datasets. Populated by Epic 10/11.

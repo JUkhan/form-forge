@@ -3,6 +3,7 @@ using System;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace FormForge.Api.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(FormForgeDbContext))]
-    partial class FormForgeDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260617034800_AddDatasetQueryType")]
+    partial class AddDatasetQueryType
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

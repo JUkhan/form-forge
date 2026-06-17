@@ -26,6 +26,13 @@ import PropertyInspector from '@/components/designer/PropertyInspector'
 import ComponentPreviewModal from '@/components/designer/ComponentPreviewModal'
 import { collectFieldKeyErrors } from '@/components/designer/fieldKeyValidation'
 import { collectPgTypeErrors } from '@/components/designer/pgTypes'
+import {
+  collectDatasetComponents,
+  parseQueryParamBindings,
+  unmappedParams,
+} from '@/components/designer/queryParamBindings'
+import { getDataset } from '@/features/datasets/datasetApi'
+import { extractPlaceholders } from '@/features/datasets/queryParameters'
 import { useKeyboardDnD } from '@/components/designer/useKeyboardDnD'
 import type { DragData } from '@/components/designer/dnd'
 import { ApiError } from '@/lib/api/apiError'
@@ -229,7 +236,7 @@ function DesignerPage() {
   const trimmedName = displayName.trim()
   const canSave = trimmedName.length > 0 && rootElement !== null
 
-  function handleSave() {
+  async function handleSave() {
     if (!canSave || saveMutation.isPending) return
     // canSave guarantees rootElement is non-null; the explicit guard keeps
     // TypeScript happy when narrowing the SaveVars rootElement type.
@@ -242,6 +249,36 @@ function DesignerPage() {
     // returns 422 if anything slips past (e.g. a stale client missing the
     // PG reserved-keyword list).
     const errors = [...collectFieldKeyErrors(rootElement), ...collectPgTypeErrors(rootElement)]
+
+    // Parameterized "query" datasets must have every {_placeholder} bound to a filter input
+    // before the form can be saved. Detecting them needs the dataset's SQL — ensureQueryData
+    // returns the inspector-cached detail or fetches it once.
+    for (const el of collectDatasetComponents(rootElement)) {
+      const datasetId =
+        typeof el.properties.optionsDatasetId === 'string' ? el.properties.optionsDatasetId : ''
+      if (datasetId === '') continue
+      let detail
+      try {
+        detail = await qc.ensureQueryData({
+          queryKey: ['dataset', 'detail', datasetId],
+          queryFn: () => getDataset(datasetId),
+          staleTime: 60_000,
+        })
+      } catch {
+        continue // dataset unreadable here — let the backend re-validate on save
+      }
+      if (detail.queryType !== 'query') continue
+      const placeholders = extractPlaceholders(detail.query)
+      if (placeholders.length === 0) continue
+      const missing = unmappedParams(
+        parseQueryParamBindings(el.properties.queryParamBindings),
+        placeholders,
+      )
+      if (missing.length > 0) {
+        errors.push(t('designer.canvas.unmappedDatasetParams', { params: missing.join(', ') }))
+      }
+    }
+
     if (errors.length > 0) {
       setFieldKeyErrors(errors)
       return
@@ -374,7 +411,7 @@ function DesignerPage() {
                   <span className="inline-flex">
           <Button
             type="button"
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             // Always visible (rather than only-when-dirty) so the affordance
             // is stable and the user can dry-run a Save validation. Disabled
             // state communicates why via the tooltip.

@@ -82,12 +82,16 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
-            if (name is null)
+            // Column discovery for the inspector: parameterized datasets ARE allowed here
+            // (the DatasetComponent inspector needs their output columns to map filters), and
+            // values are not required since columns come from a schema probe.
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, queryParametersJson: null, allowParameterized: true,
+                CommandTimeoutSeconds, ct, requireParameterValues: false).ConfigureAwait(false);
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
                 return null;
-
-            var columns = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            return new DatasetColumnsDto(datasetId, name.Value, columns);
+            var src = resolved.Source!;
+            return new DatasetColumnsDto(datasetId, src.Name.Value, [.. src.ColumnOrder]);
         }
         finally
         {
@@ -102,11 +106,13 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var columns = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            // A real VIEW always has ≥1 column; an empty set means no such VIEW exists.
-            if (columns.Count == 0)
+            var resolved = await DatasetSourceResolver.ResolveByNameAsync(
+                conn, name, queryParametersJson: null, allowParameterized: true,
+                CommandTimeoutSeconds, ct, requireParameterValues: false).ConfigureAwait(false);
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
                 return null;
-            return new DatasetColumnsDto(Guid.Empty, name.Value, columns);
+            var src = resolved.Source!;
+            return new DatasetColumnsDto(Guid.Empty, src.Name.Value, [.. src.ColumnOrder]);
         }
         finally
         {
@@ -134,12 +140,16 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
-            if (name is null)
-                return new DatasetOptionsResult(DatasetOptionsOutcome.NotFound);
+            // Dropdown options reject parameterized queries (palette-only): allowParameterized=false.
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, queryParametersJson: null, allowParameterized: false,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            var mapped = MapNonOk(resolved);
+            if (mapped is not null)
+                return mapped;
 
             return await BuildOptionsAsync(
-                conn, name, labelField, valueField, search, valueEquals, filters, page, pageSize, ct)
+                conn, resolved.Source!, labelField, valueField, search, valueEquals, filters, page, pageSize, ct)
                 .ConfigureAwait(false);
         }
         finally
@@ -147,6 +157,16 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
             await conn.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    // Maps a non-Ok source resolution to the options result (null when Ok). NotFound → 404;
+    // Forbidden (a parameterized query used as a dropdown source) / Invalid → 422 InvalidField.
+    private static DatasetOptionsResult? MapNonOk(DatasetSourceResolution resolved) =>
+        resolved.Outcome switch
+        {
+            DatasetSourceOutcome.Ok => null,
+            DatasetSourceOutcome.NotFound => new DatasetOptionsResult(DatasetOptionsOutcome.NotFound),
+            _ => new DatasetOptionsResult(DatasetOptionsOutcome.InvalidField, ErrorDetail: resolved.Error),
+        };
 
     public async Task<DatasetOptionsResult> GetOptionsByNameAsync(
         DatasetName name,
@@ -169,8 +189,15 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
+            var resolved = await DatasetSourceResolver.ResolveByNameAsync(
+                conn, name, queryParametersJson: null, allowParameterized: false,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            var mapped = MapNonOk(resolved);
+            if (mapped is not null)
+                return mapped;
+
             return await BuildOptionsAsync(
-                conn, name, labelField, valueField, search, valueEquals, filters, page, pageSize, ct)
+                conn, resolved.Source!, labelField, valueField, search, valueEquals, filters, page, pageSize, ct)
                 .ConfigureAwait(false);
         }
         finally
@@ -179,11 +206,10 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         }
     }
 
-    // Shared options query against a resolved dataset VIEW. Returns NotFound when the
-    // VIEW exposes no columns (i.e. does not exist).
+    // Shared options query against a resolved dataset source (VIEW or query-type CTE).
     private static async Task<DatasetOptionsResult> BuildOptionsAsync(
         Npgsql.NpgsqlConnection conn,
-        DatasetName name,
+        DatasetResolvedSource src,
         string labelField,
         string valueField,
         string? search,
@@ -194,10 +220,7 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         CancellationToken ct)
     {
         {
-            var columns = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            if (columns.Count == 0)
-                return new DatasetOptionsResult(DatasetOptionsOutcome.NotFound);
-            var allowed = new HashSet<string>(columns, StringComparer.Ordinal);
+            var allowed = new HashSet<string>(src.ColumnOrder, StringComparer.Ordinal);
             if (!allowed.Contains(labelField))
                 return new DatasetOptionsResult(DatasetOptionsOutcome.InvalidField,
                     ErrorDetail: $"Unknown label field '{labelField}'.");
@@ -206,10 +229,11 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
                     ErrorDetail: $"Unknown value field '{valueField}'.");
 
             // Both identifiers are exact members of the discovered column set, so
-            // quoting them (with doubled-quote escaping) is injection-safe.
+            // quoting them (with doubled-quote escaping) is injection-safe. The relation is
+            // either the backing VIEW or the "_ds" CTE (with src.WithClause prepended).
             var valueId = QuoteIdentifier(valueField);
             var labelId = QuoteIdentifier(labelField);
-            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
+            var viewRef = src.Relation;
 
             var parameters = new DynamicParameters();
             var predicates = new List<string>();
@@ -248,7 +272,7 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
             // surface (the identifiers) is already validated + quote-escaped above.
             var where = predicates.Count > 0 ? " WHERE " + string.Join(" AND ", predicates) : string.Empty;
 
-            var countSql =
+            var countSql = src.WithClause +
                 $"SELECT COUNT(*) FROM (SELECT DISTINCT {valueId}, {labelId} FROM {viewRef}{where}) AS sub";
             var total = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
                 countSql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))
@@ -256,7 +280,7 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
 
             parameters.Add("p_limit", pageSize);
             parameters.Add("p_offset", (long)(page - 1) * pageSize);
-            var selectSql =
+            var selectSql = src.WithClause +
                 $"SELECT DISTINCT {valueId} AS value, {labelId} AS label FROM {viewRef}{where} " +
                 "ORDER BY label, value LIMIT @p_limit OFFSET @p_offset";
 
@@ -279,40 +303,6 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
             return new DatasetOptionsResult(DatasetOptionsOutcome.Success,
                 new PagedResult<DropdownOption>(options, total, page, pageSize));
         }
-    }
-
-    // Loads custom_dataset.dataset_name for `id` and re-validates it as a DatasetName
-    // (the value was constrained at creation, but re-validating gives a safe-to-quote
-    // identifier and guards against any out-of-band row tampering). Returns null when
-    // the row is absent or the stored name no longer validates.
-    private static async Task<DatasetName?> ResolveDatasetNameAsync(
-        Npgsql.NpgsqlConnection conn, Guid id, CancellationToken ct)
-    {
-        var rawName = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
-            "SELECT dataset_name FROM custom_dataset WHERE id = @id",
-            new { id }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))
-            .ConfigureAwait(false);
-        if (rawName is null)
-            return null;
-        return DatasetName.TryCreate(rawName, out var name, out _) ? name : null;
-    }
-
-    // The dataset's backing VIEW columns, in definition order. information_schema
-    // exposes only objects the connection's role can see; the formforge role owns
-    // the datasets schema, so its own views are visible here.
-    private static async Task<IReadOnlyList<string>> GetViewColumnsAsync(
-        Npgsql.NpgsqlConnection conn, DatasetName name, CancellationToken ct)
-    {
-        var cols = await conn.QueryAsync<string>(new CommandDefinition(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'datasets' AND table_name = @name
-            ORDER BY ordinal_position
-            """,
-            new { name = name.Value }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))
-            .ConfigureAwait(false);
-        return cols.ToList();
     }
 
     // Double-quote a SQL identifier, escaping any embedded double-quote per the SQL

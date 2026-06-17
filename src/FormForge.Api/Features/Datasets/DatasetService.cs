@@ -92,6 +92,11 @@ internal sealed partial class DatasetService(
     IDatasetAllowlist allowlist,
     ILogger<DatasetService> logger) : IDatasetService
 {
+    // Used only to substitute {_placeholder} tokens with $N when probing a parameterized
+    // "query"-type SQL for SELECT-only validation (the bound values are irrelevant there).
+    private static readonly IReadOnlyDictionary<string, object?> EmptyParameters =
+        new Dictionary<string, object?>(StringComparer.Ordinal);
+
     public async Task<CreateDatasetResult> CreateAsync(
         CreateDatasetRequest request,
         DatasetName name,
@@ -109,6 +114,24 @@ internal sealed partial class DatasetService(
             .FirstOrDefaultAsync(ct)
             .ConfigureAwait(false);
 
+        // Parameterized-query feature — resolve the query type ("view" default). A "query"
+        // dataset is stored as a record only (no backing VIEW) and may carry {_placeholder}
+        // tokens. An unrecognized value is rejected before any work.
+        string queryType;
+        if (request.QueryType is null)
+        {
+            queryType = DatasetQueryTypes.View;
+        }
+        else
+        {
+            var normalizedType = DatasetQueryTypes.Normalize(request.QueryType);
+            if (normalizedType is null)
+                return new CreateDatasetResult(CreateDatasetOutcome.InvalidQuery,
+                    ErrorDetail: $"Unknown query type '{request.QueryType}'. Expected 'view' or 'query'.");
+            queryType = normalizedType;
+        }
+        var isQueryType = queryType == DatasetQueryTypes.Query;
+
         // AC-2 — null/empty query becomes a placeholder VIEW definition.
         var effectiveQuery = string.IsNullOrWhiteSpace(request.Query)
             ? "SELECT 1 AS placeholder"
@@ -120,9 +143,11 @@ internal sealed partial class DatasetService(
         // sends one; this gate future-proofs the API and resolves the deferred item from 11.1).
         // Runs before the viewDdl pre-build so the generated SQL flows into the VIEW DDL and
         // the INSERT below, keeping custom_dataset.query and the backing VIEW in sync (AC-4).
-        var effectiveBuilderState = request.BuilderState;
+        // A "query"-type dataset never uses the visual builder (the UI disables it), so skip
+        // builder regeneration entirely for it.
+        var effectiveBuilderState = isQueryType ? null : request.BuilderState;
         var builderRegenerated = false;
-        if (!request.IsCustomQuery && !string.IsNullOrWhiteSpace(effectiveBuilderState))
+        if (!isQueryType && !request.IsCustomQuery && !string.IsNullOrWhiteSpace(effectiveBuilderState))
         {
             var bsDto = BuilderStateSerializer.Deserialize(effectiveBuilderState);
             if (bsDto is null)
@@ -147,16 +172,22 @@ internal sealed partial class DatasetService(
             : (string.IsNullOrWhiteSpace(request.Query) ? null : request.Query);
 
         // Pre-build the DDL so the audit log can record it even when the VIEW DDL fails.
-        var viewDdl = DatasetViewManager.BuildCreateViewDdl(name, effectiveQuery);
+        // A "query"-type dataset has no backing VIEW, so there is no DDL.
+        var viewDdl = isQueryType ? null : DatasetViewManager.BuildCreateViewDdl(name, effectiveQuery);
 
         // Story 8.8 (AR-61) — checkpoint (a): enforce SELECT-only before any DDL. Runs
         // before the connection opens, so invalid input consumes no DB resources and
-        // reaches no db.DatasetAuditLog.Add (AC-5). Only Custom Query mode with a
-        // user-provided query is enforced; builder-mode and placeholder-only creates
-        // bypass enforcement (Stories 11.x cover checkpoint b).
-        if (request.IsCustomQuery && !string.IsNullOrWhiteSpace(request.Query))
+        // reaches no db.DatasetAuditLog.Add (AC-5). Custom Query mode and "query"-type both
+        // enforce a user-provided query; builder-mode and placeholder-only creates bypass it
+        // (Stories 11.x cover checkpoint b). For a "query"-type query the {_placeholder}
+        // tokens are first substituted with positional $N params so the probe parses as a
+        // SelectStmt (the tokens themselves are not valid SQL).
+        if (!string.IsNullOrWhiteSpace(request.Query) && (request.IsCustomQuery || isQueryType))
         {
-            var enforcement = SqlSelectEnforcer.Validate(request.Query);
+            var probe = isQueryType
+                ? DatasetParameterResolver.Resolve(request.Query, EmptyParameters).Sql
+                : request.Query;
+            var enforcement = SqlSelectEnforcer.Validate(probe);
             if (!enforcement.IsValid)
                 return new CreateDatasetResult(CreateDatasetOutcome.InvalidQuery,
                     ErrorDetail: enforcement.ErrorMessage);
@@ -178,9 +209,9 @@ internal sealed partial class DatasetService(
             {
                 const string insertSql = """
                     INSERT INTO custom_dataset
-                        (id, dataset_name, is_custom_query, query, builder_state, version, created_at, created_by)
+                        (id, dataset_name, is_custom_query, query_type, query, builder_state, version, created_at, created_by)
                     VALUES
-                        (@id, @datasetName, @isCustomQuery, @query, @builderState::jsonb, 1, @now, @createdBy)
+                        (@id, @datasetName, @isCustomQuery, @queryType, @query, @builderState::jsonb, 1, @now, @createdBy)
                     """;
 
                 await conn.ExecuteAsync(new CommandDefinition(
@@ -190,6 +221,7 @@ internal sealed partial class DatasetService(
                         id = newId,
                         datasetName = name.Value,
                         isCustomQuery = request.IsCustomQuery,
+                        queryType,
                         query = (object?)persistedQuery ?? DBNull.Value,
                         builderState = string.IsNullOrWhiteSpace(effectiveBuilderState)
                             ? (object?)DBNull.Value
@@ -201,7 +233,9 @@ internal sealed partial class DatasetService(
                     commandTimeout: 5,
                     cancellationToken: ct)).ConfigureAwait(false);
 
-                await viewManager.CreateAsync(conn, tx, name, effectiveQuery, ct).ConfigureAwait(false);
+                // A "query"-type dataset is stored as a record only — no backing VIEW.
+                if (!isQueryType)
+                    await viewManager.CreateAsync(conn, tx, name, effectiveQuery, ct).ConfigureAwait(false);
 
                 // Once committing, do not allow host shutdown to cancel mid-flight.
                 await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -245,6 +279,7 @@ internal sealed partial class DatasetService(
             {
                 dataset_name = name.Value,
                 is_custom_query = request.IsCustomQuery,
+                query_type = queryType,
                 query = persistedQuery,
             })
             : null;
@@ -284,7 +319,8 @@ internal sealed partial class DatasetService(
                 BuilderState: string.IsNullOrWhiteSpace(effectiveBuilderState) ? null : effectiveBuilderState,
                 Version: 1,
                 CreatedAt: now,
-                CreatedBy: actorId);
+                CreatedBy: actorId,
+                QueryType: queryType);
             return new CreateDatasetResult(CreateDatasetOutcome.Success, Dataset: dto);
         }
 
@@ -329,6 +365,7 @@ internal sealed partial class DatasetService(
                 SELECT id              AS "Id",
                        dataset_name    AS "DatasetName",
                        is_custom_query AS "IsCustomQuery",
+                       query_type      AS "QueryType",
                        query           AS "Query",
                        builder_state   AS "BuilderState",
                        version         AS "Version",
@@ -360,6 +397,25 @@ internal sealed partial class DatasetService(
                 ? request.BuilderState : current.BuilderState;
             var effectiveIsCustomQuery = request.IsCustomQuery ?? current.IsCustomQuery;
 
+            // Parameterized-query feature — resolve the effective query type (omitted = keep
+            // current). A transition between "view" and "query" drives the VIEW create/drop in
+            // Step F below. wasView/newIsView capture the before/after materialization.
+            string effectiveQueryType;
+            if (request.QueryType is null)
+            {
+                effectiveQueryType = current.QueryType;
+            }
+            else
+            {
+                var normalizedType = DatasetQueryTypes.Normalize(request.QueryType);
+                if (normalizedType is null)
+                    return new UpdateDatasetResult(UpdateDatasetOutcome.InvalidQuery,
+                        ErrorDetail: $"Unknown query type '{request.QueryType}'. Expected 'view' or 'query'.");
+                effectiveQueryType = normalizedType;
+            }
+            var wasView = current.QueryType == DatasetQueryTypes.View;
+            var newIsView = effectiveQueryType == DatasetQueryTypes.View;
+
             // Story 11.1 (FR-70 / AR-66) — checkpoint (b): for builder mode, re-derive the
             // SQL SELECT from builder_state on the server (the client cannot be trusted to
             // send a safe query). Runs after the version/concurrency checks (Step C) so an
@@ -367,8 +423,10 @@ internal sealed partial class DatasetService(
             // opens and before any audit row is written. The generated ViewSql overrides
             // effectiveNewQuery, which then flows into effectiveViewQuery (VIEW DDL) and the
             // row UPDATE below — keeping custom_dataset.query and the backing VIEW in sync (AC-5).
+            // Builder regeneration applies only to "view"-type datasets (a "query" dataset has
+            // no builder and no backing VIEW).
             var builderRegenerated = false;
-            if (!effectiveIsCustomQuery && !string.IsNullOrWhiteSpace(effectiveBuilderState))
+            if (newIsView && !effectiveIsCustomQuery && !string.IsNullOrWhiteSpace(effectiveBuilderState))
             {
                 var builderState = BuilderStateSerializer.Deserialize(effectiveBuilderState);
                 if (builderState is null)
@@ -402,32 +460,57 @@ internal sealed partial class DatasetService(
             // Story 8.8 (AR-61) — checkpoint (a): enforce SELECT-only before the UPDATE
             // transaction. Inside the outer try, so the outer finally disposes conn on this
             // early return (same pattern as the NotFound / ConcurrencyConflict returns). Runs
-            // for every Custom Query mode update with a non-empty effective query — not just
-            // on query changes — to also catch mode-switches (builder→custom) and any
-            // pre-existing non-SELECT stored queries. The !IsNullOrWhiteSpace guard lets
-            // empty-string overwrites (placeholder VIEW) bypass enforcement. No transaction
-            // opens and no audit row is written on rejection (AC-5).
-            if (effectiveIsCustomQuery && !string.IsNullOrWhiteSpace(effectiveNewQuery))
+            // for every Custom Query update and every "query"-type update with a non-empty
+            // effective query — not just on query changes — to also catch mode-switches
+            // (builder→custom) and any pre-existing non-SELECT stored queries. For a "query"
+            // dataset the {_placeholder} tokens are first substituted with $N so the probe
+            // parses. The !IsNullOrWhiteSpace guard lets empty-string overwrites bypass it.
+            if (!string.IsNullOrWhiteSpace(effectiveNewQuery) && (effectiveIsCustomQuery || !newIsView))
             {
-                var enforcement = SqlSelectEnforcer.Validate(effectiveNewQuery);
+                var probe = !newIsView
+                    ? DatasetParameterResolver.Resolve(effectiveNewQuery, EmptyParameters).Sql
+                    : effectiveNewQuery;
+                var enforcement = SqlSelectEnforcer.Validate(probe);
                 if (!enforcement.IsValid)
                     return new UpdateDatasetResult(UpdateDatasetOutcome.InvalidQuery,
                         ErrorDetail: enforcement.ErrorMessage);
             }
 
-            // Step E — pre-build the DDL string(s) for the audit log so a failed DDL is
-            // still recorded. The rename DDL is primary; a query change appends the REPLACE.
-            var primaryDdl = isRename
-                ? DatasetViewManager.BuildRenameViewDdl(current.DatasetName, effectiveNewName)
-                : DatasetViewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
-            if (isRename && queryChanged)
+            // Step E — pre-build the DDL string(s) for the audit log so a failed DDL is still
+            // recorded. The DDL depends on the query-type transition:
+            //   view → view  : RENAME (if renamed) and/or REPLACE the definition.
+            //   view → query : DROP the existing VIEW (dataset becomes a record only).
+            //   query → view : CREATE a VIEW under the new name.
+            //   query → query: no DDL.
+            string? primaryDdl;
+            if (wasView && newIsView)
             {
-                primaryDdl = primaryDdl + "\n"
-                    + DatasetViewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
+                primaryDdl = isRename
+                    ? DatasetViewManager.BuildRenameViewDdl(current.DatasetName, effectiveNewName)
+                    : DatasetViewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
+                if (isRename && queryChanged)
+                {
+                    primaryDdl = primaryDdl + "\n"
+                        + DatasetViewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
+                }
+            }
+            else if (wasView)
+            {
+                // view → query: the VIEW still exists under the current (pre-rename) name.
+                primaryDdl = DatasetViewManager.BuildDropViewDdl(current.DatasetName);
+            }
+            else if (newIsView)
+            {
+                // query → view: no prior VIEW; create one under the new name.
+                primaryDdl = DatasetViewManager.BuildCreateViewDdl(resolvedNewName!, effectiveViewQuery);
+            }
+            else
+            {
+                primaryDdl = null; // query → query: record only, no DDL.
             }
 
             // Story 11.4 (FR-73 AC-4) — annotate builder-generated DDL for audit log readability.
-            if (builderRegenerated)
+            if (builderRegenerated && primaryDdl is not null)
                 primaryDdl = "-- Builder-generated\n" + primaryDdl;
 
             // Step F — UPDATE row + VIEW DDL inside one transaction (AR-59).
@@ -438,6 +521,7 @@ internal sealed partial class DatasetService(
                     UPDATE custom_dataset
                     SET dataset_name    = @newName,
                         is_custom_query = @isCustomQuery,
+                        query_type      = @queryType,
                         query           = @query,
                         builder_state   = @builderState::jsonb,
                         version         = version + 1,
@@ -451,6 +535,7 @@ internal sealed partial class DatasetService(
                     {
                         newName = effectiveNewName,
                         isCustomQuery = effectiveIsCustomQuery,
+                        queryType = effectiveQueryType,
                         query = string.IsNullOrWhiteSpace(effectiveNewQuery)
                             ? (object?)DBNull.Value : effectiveNewQuery,
                         builderState = effectiveBuilderState is null
@@ -478,23 +563,39 @@ internal sealed partial class DatasetService(
                         CurrentVersion: freshVersion ?? current.Version);
                 }
 
-                // VIEW DDL (§2): rename first if the name changed, then REPLACE the
-                // definition when the query changed (or always, when not a rename).
-                if (isRename)
+                // VIEW DDL (§2) — driven by the query-type transition (see Step E).
+                if (wasView && newIsView)
                 {
-                    await viewManager.RenameAsync(conn, tx, current.DatasetName, effectiveNewName, ct)
-                        .ConfigureAwait(false);
-                    if (queryChanged)
+                    // view → view: rename first if the name changed, then REPLACE the
+                    // definition when the query changed (or always, when not a rename).
+                    if (isRename)
+                    {
+                        await viewManager.RenameAsync(conn, tx, current.DatasetName, effectiveNewName, ct)
+                            .ConfigureAwait(false);
+                        if (queryChanged)
+                        {
+                            await viewManager.ReplaceAsync(conn, tx, resolvedNewName!, effectiveViewQuery, ct)
+                                .ConfigureAwait(false);
+                        }
+                    }
+                    else
                     {
                         await viewManager.ReplaceAsync(conn, tx, resolvedNewName!, effectiveViewQuery, ct)
                             .ConfigureAwait(false);
                     }
                 }
-                else
+                else if (wasView)
                 {
-                    await viewManager.ReplaceAsync(conn, tx, resolvedNewName!, effectiveViewQuery, ct)
+                    // view → query: drop the existing VIEW (still under the current name).
+                    await viewManager.DropAsync(conn, tx, current.DatasetName, ct).ConfigureAwait(false);
+                }
+                else if (newIsView)
+                {
+                    // query → view: create a fresh VIEW under the new name.
+                    await viewManager.CreateAsync(conn, tx, resolvedNewName!, effectiveViewQuery, ct)
                         .ConfigureAwait(false);
                 }
+                // else query → query: record only, no VIEW DDL.
 
                 await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
                 succeeded = true;
@@ -532,6 +633,7 @@ internal sealed partial class DatasetService(
             {
                 dataset_name = current.DatasetName,
                 is_custom_query = current.IsCustomQuery,
+                query_type = current.QueryType,
                 query = current.Query,
                 builder_state = current.BuilderState,
                 version = current.Version,
@@ -541,6 +643,7 @@ internal sealed partial class DatasetService(
                 {
                     dataset_name = effectiveNewName,
                     is_custom_query = effectiveIsCustomQuery,
+                    query_type = effectiveQueryType,
                     query = string.IsNullOrWhiteSpace(effectiveNewQuery) ? null : effectiveNewQuery,
                     builder_state = effectiveBuilderState,
                     version = request.Version + 1,
@@ -583,7 +686,8 @@ internal sealed partial class DatasetService(
                     BuilderState: effectiveBuilderState,
                     Version: request.Version + 1,
                     CreatedAt: current.CreatedAt,
-                    CreatedBy: current.CreatedBy);
+                    CreatedBy: current.CreatedBy,
+                    QueryType: effectiveQueryType);
                 return new UpdateDatasetResult(UpdateDatasetOutcome.Success, Dataset: dto);
             }
 
@@ -625,6 +729,7 @@ internal sealed partial class DatasetService(
                 SELECT id              AS "Id",
                        dataset_name    AS "DatasetName",
                        is_custom_query AS "IsCustomQuery",
+                       query_type      AS "QueryType",
                        query           AS "Query",
                        builder_state   AS "BuilderState",
                        version         AS "Version",
@@ -642,7 +747,9 @@ internal sealed partial class DatasetService(
             }
 
             // Step C — pre-build the DROP DDL so the audit log records it even on failure.
-            var dropDdl = DatasetViewManager.BuildDropViewDdl(current.DatasetName);
+            // A "query"-type dataset has no backing VIEW, so there is nothing to drop.
+            var hasView = current.QueryType == DatasetQueryTypes.View;
+            var dropDdl = hasView ? DatasetViewManager.BuildDropViewDdl(current.DatasetName) : null;
             var now = DateTimeOffset.UtcNow;
 
             // Step D — DELETE row + DROP VIEW inside one transaction (AR-59).
@@ -665,7 +772,8 @@ internal sealed partial class DatasetService(
                     return new DeleteDatasetResult(DeleteDatasetOutcome.NotFound);
                 }
 
-                await viewManager.DropAsync(conn, tx, current.DatasetName, ct).ConfigureAwait(false);
+                if (hasView)
+                    await viewManager.DropAsync(conn, tx, current.DatasetName, ct).ConfigureAwait(false);
 
                 // Once committing, do not allow host shutdown to cancel mid-flight.
                 await tx.CommitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -696,6 +804,7 @@ internal sealed partial class DatasetService(
             {
                 dataset_name = current.DatasetName,
                 is_custom_query = current.IsCustomQuery,
+                query_type = current.QueryType,
                 query = current.Query,
                 builder_state = current.BuilderState,
                 version = current.Version,
@@ -777,6 +886,7 @@ internal sealed partial class DatasetService(
                 SELECT cd.id              AS "Id",
                        cd.dataset_name    AS "DatasetName",
                        cd.is_custom_query AS "IsCustomQuery",
+                       cd.query_type      AS "QueryType",
                        cd.created_at      AS "CreatedAt",
                        cd.updated_at      AS "UpdatedAt",
                        u.display_name     AS "CreatedByName"
@@ -800,7 +910,8 @@ internal sealed partial class DatasetService(
                     r.Id, r.DatasetName, r.IsCustomQuery,
                     r.CreatedAt,          // DateTime → DateTimeOffset (implicit, UTC)
                     r.UpdatedAt,          // DateTime? → DateTimeOffset?
-                    r.CreatedByName))
+                    r.CreatedByName,
+                    r.QueryType))
                 .ToList();
 
             return new PagedResult<DatasetSummaryDto>(data, total, page, pageSize);
@@ -854,6 +965,7 @@ internal sealed partial class DatasetService(
                 SELECT id              AS "Id",
                        dataset_name    AS "DatasetName",
                        is_custom_query AS "IsCustomQuery",
+                       query_type      AS "QueryType",
                        query           AS "Query",
                        builder_state   AS "BuilderState",
                        version         AS "Version",
@@ -877,7 +989,8 @@ internal sealed partial class DatasetService(
                 BuilderState: row.BuilderState,
                 Version: row.Version,
                 CreatedAt: row.CreatedAt,   // DateTime → DateTimeOffset implicit
-                CreatedBy: row.CreatedBy);
+                CreatedBy: row.CreatedBy,
+                QueryType: row.QueryType);
         }
         finally
         {
@@ -894,6 +1007,7 @@ internal sealed partial class DatasetService(
         Guid Id,
         string DatasetName,
         bool IsCustomQuery,
+        string QueryType,
         DateTime CreatedAt,
         DateTime? UpdatedAt,
         string? CreatedByName);
@@ -907,6 +1021,7 @@ internal sealed partial class DatasetService(
         Guid Id,
         string DatasetName,
         bool IsCustomQuery,
+        string QueryType,
         string? Query,
         string? BuilderState,
         int Version,

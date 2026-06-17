@@ -8,4 +8,5 @@ internal sealed record DatasetSummaryDto(
     bool IsCustomQuery,
     DateTimeOffset CreatedAt,
     DateTimeOffset? UpdatedAt,
-    string? CreatedByName);
+    string? CreatedByName,
+    string QueryType);

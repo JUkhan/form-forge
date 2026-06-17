@@ -84,6 +84,21 @@ public sealed class DatasetPreviewTests : IClassFixture<PostgresFixture>, IAsync
             INSERT INTO public.preview_probe (id, status) VALUES (1, 'open'), (2, 'closed');
             """);
 
+        // A table with uuid + integer columns to exercise parameterized {_placeholder}
+        // resolution and `unknown`-typed binding (uuid/integer literal coercion).
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            DROP TABLE IF EXISTS public.param_probe CASCADE;
+            CREATE TABLE public.param_probe (
+                id   uuid NOT NULL,
+                age  integer NOT NULL,
+                name text
+            );
+            INSERT INTO public.param_probe (id, age, name) VALUES
+              ('11111111-1111-1111-1111-111111111111', 30, 'alice'),
+              ('22222222-2222-2222-2222-222222222222', 20, 'bob');
+            """);
+
         await ReseedRolesAsync(db);
         await SeedUsersAsync(db);
 
@@ -101,6 +116,7 @@ public sealed class DatasetPreviewTests : IClassFixture<PostgresFixture>, IAsync
             {
                 var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
                 await db.Database.ExecuteSqlRawAsync("DROP TABLE IF EXISTS public.preview_probe CASCADE;");
+                await db.Database.ExecuteSqlRawAsync("DROP TABLE IF EXISTS public.param_probe CASCADE;");
             }
 
             _client?.Dispose();
@@ -131,6 +147,50 @@ public sealed class DatasetPreviewTests : IClassFixture<PostgresFixture>, IAsync
         Assert.Equal("n", Assert.Single(result!.Columns));
         Assert.Single(result.Rows);
         Assert.Equal(1, result.Rows[0][0].GetInt32());
+    }
+
+    // ---------- Parameterized query: {_placeholder} resolution + literal coercion ----------
+
+    [Fact]
+    public async Task Post_Preview_ParameterizedQuery_ResolvesPlaceholdersAndCoercesTypes()
+    {
+        var token = await LoginAsync("admin@example.com");
+
+        // age > {_age} (integer) AND id = '{_student_id}' (quoted → uuid). Only 'alice'
+        // (age 30, matching id) satisfies both — proving the `unknown`-typed binding coerces
+        // the bound values to integer and uuid exactly like inline literals would.
+        using var response = await PostPreviewAsync(token, new
+        {
+            isCustomQuery = true,
+            queryType = "query",
+            query = "SELECT name FROM param_probe WHERE age > {_age} AND id = '{_student_id}'",
+            queryParameters = "{\"_age\":25,\"_student_id\":\"11111111-1111-1111-1111-111111111111\"}",
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<PreviewResponse>();
+        Assert.NotNull(result);
+        Assert.Equal("name", Assert.Single(result!.Columns));
+        var row = Assert.Single(result.Rows);
+        Assert.Equal("alice", row[0].GetString());
+    }
+
+    [Fact]
+    public async Task Post_Preview_ParameterizedQuery_MissingValue_Returns422()
+    {
+        var token = await LoginAsync("admin@example.com");
+
+        using var response = await PostPreviewAsync(token, new
+        {
+            isCustomQuery = true,
+            queryType = "query",
+            query = "SELECT name FROM param_probe WHERE age > {_age}",
+            queryParameters = "{}",
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        Assert.Equal("DATASET_PARAMETERS_REQUIRED", doc.RootElement.GetProperty("code").GetString());
     }
 
     // ---------- Test 2: DDL query → 422 DATASET_QUERY_INVALID ----------

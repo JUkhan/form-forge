@@ -382,6 +382,82 @@ public sealed class DatasetRowQueryTests : IClassFixture<PostgresFixture>, IAsyn
         Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
     }
 
+    // ---------- query-type datasets (no backing VIEW) ----------
+
+    [Fact]
+    public async Task Post_Rows_QueryTypeDataset_HasNoView_AndReturnsRows()
+    {
+        var token = await LoginAsync("admin@example.com");
+        var id = await CreateQueryDatasetAsync(token, "rows_query_type", DatasetQuery);
+
+        // A "query"-type dataset is stored as a record only — no backing VIEW is created.
+        Assert.Equal(0, await CountDatasetViewsAsync("rows_query_type"));
+
+        using var response = await PostRowsAsync(token, id, new
+        {
+            filters = new
+            {
+                id = "root",
+                kind = "group",
+                combinator = "AND",
+                items = new object[]
+                {
+                    new { id = "c1", kind = "condition", tableName = "", columnName = "salary", @operator = ">=", value = "80" },
+                },
+            },
+            sort = new[] { new { column = "emp_id", direction = "asc" } },
+            page = 1,
+            pageSize = 25,
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var page = await response.Content.ReadFromJsonAsync<RowsPage>();
+        Assert.NotNull(page);
+        Assert.Equal(3, page!.Total); // Alice(100), Bob(90), Carol(80) — the CTE source filters live.
+        Assert.Equal(AllColumns, page.Columns);
+    }
+
+    [Fact]
+    public async Task Post_Rows_ParameterizedDataset_ResolvesParametersAndFilters()
+    {
+        var token = await LoginAsync("admin@example.com");
+        // Integer placeholder ({_min}) + quoted text placeholder ('{_name}') — both bound as
+        // `unknown` so they coerce to integer / text like inline literals would.
+        const string q =
+            "SELECT emp_id, emp_name FROM (VALUES " +
+            "(1,'Alice',100),(2,'Bob',90),(3,'Carol',80)) AS t(emp_id, emp_name, salary) " +
+            "WHERE salary >= {_min} AND emp_name = '{_name}'";
+        var id = await CreateQueryDatasetAsync(token, "rows_parameterized", q);
+
+        using var response = await PostRowsAsync(token, id, new
+        {
+            queryParameters = "{\"_min\":80,\"_name\":\"Carol\"}",
+            sort = new[] { new { column = "emp_id", direction = "asc" } },
+            page = 1,
+            pageSize = 25,
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var page = await response.Content.ReadFromJsonAsync<RowsPage>();
+        Assert.NotNull(page);
+        var row = Assert.Single(page!.Data);
+        Assert.Equal("Carol", row["emp_name"].GetString());
+    }
+
+    [Fact]
+    public async Task Post_Rows_ParameterizedDataset_MissingParameters_Returns422()
+    {
+        var token = await LoginAsync("admin@example.com");
+        const string q =
+            "SELECT emp_id FROM (VALUES (1,100),(2,90)) AS t(emp_id, salary) WHERE salary >= {_min}";
+        var id = await CreateQueryDatasetAsync(token, "rows_param_missing", q);
+
+        // No queryParameters supplied → the placeholder can't be resolved → 422.
+        using var response = await PostRowsAsync(token, id, new { page = 1, pageSize = 25 });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+    }
+
     // ---------- helpers ----------
 
     private async Task<HttpResponseMessage> PostRowsAsync(string token, Guid id, object body)
@@ -416,6 +492,37 @@ public sealed class DatasetRowQueryTests : IClassFixture<PostgresFixture>, IAsyn
         var dto = await response.Content.ReadFromJsonAsync<CreatedDataset>();
         Assert.NotNull(dto);
         return dto!.Id;
+    }
+
+    private async Task<Guid> CreateQueryDatasetAsync(string token, string datasetName, string query)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/datasets")
+        {
+            Content = JsonContent.Create(new
+            {
+                datasetName,
+                isCustomQuery = true,
+                queryType = "query",
+                query,
+            }),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await _client!.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var dto = await response.Content.ReadFromJsonAsync<CreatedDataset>();
+        Assert.NotNull(dto);
+        return dto!.Id;
+    }
+
+    private async Task<int> CountDatasetViewsAsync(string name)
+    {
+        using var scope = _factory!.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
+        return await db.Database
+            .SqlQueryRaw<int>(
+                "SELECT COUNT(*)::int AS \"Value\" FROM information_schema.views " +
+                "WHERE table_schema = 'datasets' AND table_name = {0}", name)
+            .FirstAsync();
     }
 
     private async Task<string> LoginAsync(string email)

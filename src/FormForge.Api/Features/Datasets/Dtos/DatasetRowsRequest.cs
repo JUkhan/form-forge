@@ -17,7 +17,11 @@ internal sealed record DatasetRowsRequest(
     // When set, the rows are scoped to those whose value equals the requesting user's
     // id. The COLUMN comes from the client (schema config); the VALUE is always the
     // server-resolved JWT user id (never client-supplied), so it can't be spoofed.
-    string? AuthFilterColumn = null);
+    string? AuthFilterColumn = null,
+    // Parameterized-query feature — JSON object string mapping each {_placeholder} in a
+    // "query"-type dataset to its value (built by the Dataset palette from its filter
+    // inputs). Ignored for view-type and non-parameterized datasets.
+    string? QueryParameters = null);
 
 // One export column: the source column plus an optional header override (defaults to the column name).
 internal sealed record DatasetExportColumnDto(string Column, string? Header = null);
@@ -26,7 +30,8 @@ internal sealed record DatasetExportRequest(
     FilterGroupDto? Filters = null,
     List<DatasetSortDto>? Sort = null,
     List<DatasetExportColumnDto>? Columns = null,
-    string? AuthFilterColumn = null);
+    string? AuthFilterColumn = null,
+    string? QueryParameters = null);
 
 // Chart aggregation (Phase 2): GROUP BY category, aggregate(value). Aggregate is one of
 // count | sum | avg | min | max (count ignores ValueColumn). Honors the same filter tree.
@@ -35,4 +40,5 @@ internal sealed record DatasetChartRequest(
     string CategoryColumn = "",
     string? ValueColumn = null,
     string Aggregate = "count",
-    string? AuthFilterColumn = null);
+    string? AuthFilterColumn = null,
+    string? QueryParameters = null);

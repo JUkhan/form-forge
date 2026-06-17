@@ -368,6 +368,10 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
             e.Property(d => d.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
             e.Property(d => d.DatasetName).HasColumnName("dataset_name").HasColumnType("text").IsRequired();
             e.Property(d => d.IsCustomQuery).HasColumnName("is_custom_query").HasDefaultValue(true);
+            // Parameterized-query feature — "view" (backing VIEW) vs "query" (record only).
+            // Defaults to "view" so existing rows keep their VIEW semantics on backfill.
+            e.Property(d => d.QueryType).HasColumnName("query_type").HasColumnType("text")
+             .HasDefaultValue(Domain.Entities.DatasetQueryTypes.View).IsRequired();
             e.Property(d => d.Query).HasColumnName("query").HasColumnType("text");
             e.Property(d => d.BuilderState).HasColumnName("builder_state").HasColumnType("jsonb");
             e.Property(d => d.Version).HasColumnName("version").HasDefaultValue(1);

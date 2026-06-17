@@ -4,6 +4,8 @@ using Dapper;
 using FormForge.Api.Domain.ValueTypes;
 using FormForge.Api.Features.Datasets.Dtos;
 using FormForge.Api.Infrastructure.Persistence;
+using Npgsql;
+using NpgsqlTypes;
 
 namespace FormForge.Api.Features.Datasets;
 
@@ -70,7 +72,8 @@ internal sealed record DatasetTreeLevelRequest(
     string? Search = null,
     int Page = 1,
     int PageSize = 25,
-    string? AuthFilterColumn = null);
+    string? AuthFilterColumn = null,
+    string? QueryParameters = null);
 
 internal sealed record DatasetTreeLevelPage(
     IReadOnlyList<IDictionary<string, object?>> Data,
@@ -132,16 +135,18 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
-            if (name is null)
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, request.QueryParameters, allowParameterized: true,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetRowsResult(DatasetRowsOutcome.NotFound);
-
-            var cols = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            var columnTypes = cols.Types;
-            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
+                return new DatasetRowsResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: resolved.Error);
+            var src = resolved.Source!;
+            var columnTypes = src.ColumnTypes;
 
             // Column projection: requested allow/order list (validated) or all columns.
-            var (selectCols, colError) = ResolveSelectColumns(request.Columns, cols);
+            var (selectCols, colError) = ResolveSelectColumns(request.Columns, src.ColumnOrder, columnTypes);
             if (colError is not null)
                 return new DatasetRowsResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: colError);
 
@@ -156,18 +161,17 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
             if (sortError is not null)
                 return new DatasetRowsResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: sortError);
 
-            var countSql = $"SELECT COUNT(*) FROM {viewRef}{where.Where}";
-            var total = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                countSql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))
+            var countSql = src.WithClause + $"SELECT COUNT(*) FROM {src.Relation}{where.Where}";
+            var total = await ScalarLongAsync(conn, countSql, parameters, src, CommandTimeoutSeconds, ct)
                 .ConfigureAwait(false);
 
             parameters.Add("p_limit", pageSize);
             parameters.Add("p_offset", (long)(page - 1) * pageSize);
             var selectList = string.Join(", ", selectCols.Select(QuoteIdentifier));
-            var selectSql =
-                $"SELECT {selectList} FROM {viewRef}{where.Where}{orderBy} LIMIT @p_limit OFFSET @p_offset";
+            var selectSql = src.WithClause +
+                $"SELECT {selectList} FROM {src.Relation}{where.Where}{orderBy} LIMIT @p_limit OFFSET @p_offset";
 
-            var rows = await QueryRowsAsync(conn, selectSql, parameters, CommandTimeoutSeconds, ct)
+            var rows = await QueryRowsAsync(conn, selectSql, parameters, src, CommandTimeoutSeconds, ct)
                 .ConfigureAwait(false);
 
             var totalPages = pageSize == 0 ? 0 : (int)((total + pageSize - 1) / pageSize);
@@ -188,13 +192,16 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
-            if (name is null)
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, request.QueryParameters, allowParameterized: true,
+                ExportCommandTimeoutSeconds, ct).ConfigureAwait(false);
+            if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetExportResult(DatasetExportOutcome.NotFound);
-
-            var cols = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            var columnTypes = cols.Types;
-            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
+                return new DatasetExportResult(DatasetExportOutcome.InvalidRequest, ErrorDetail: resolved.Error);
+            var src = resolved.Source!;
+            var columnTypes = src.ColumnTypes;
+            var name = src.Name;
 
             // Resolve columns + headers. Absent ⇒ all columns (ordinal order), header = column name.
             List<string> selectCols;
@@ -214,8 +221,8 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
             }
             else
             {
-                selectCols = [.. cols.Order];
-                headers = [.. cols.Order];
+                selectCols = [.. src.ColumnOrder];
+                headers = [.. src.ColumnOrder];
             }
 
             var parameters = new DynamicParameters();
@@ -230,17 +237,16 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
                 return new DatasetExportResult(DatasetExportOutcome.InvalidRequest, ErrorDetail: sortError);
 
             // Count-first so an "export everything" can't OOM the process.
-            var countSql = $"SELECT COUNT(*) FROM {viewRef}{where.Where}";
-            var total = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                countSql, parameters, commandTimeout: ExportCommandTimeoutSeconds, cancellationToken: ct))
+            var countSql = src.WithClause + $"SELECT COUNT(*) FROM {src.Relation}{where.Where}";
+            var total = await ScalarLongAsync(conn, countSql, parameters, src, ExportCommandTimeoutSeconds, ct)
                 .ConfigureAwait(false);
             if (total > MaxExportRows)
                 return new DatasetExportResult(DatasetExportOutcome.TooManyRows,
                     ErrorDetail: $"Result set ({total} rows) exceeds the export limit of {MaxExportRows}.");
 
             var selectList = string.Join(", ", selectCols.Select(QuoteIdentifier));
-            var selectSql = $"SELECT {selectList} FROM {viewRef}{where.Where}{orderBy}";
-            var rows = await QueryRowsAsync(conn, selectSql, parameters, ExportCommandTimeoutSeconds, ct)
+            var selectSql = src.WithClause + $"SELECT {selectList} FROM {src.Relation}{where.Where}{orderBy}";
+            var rows = await QueryRowsAsync(conn, selectSql, parameters, src, ExportCommandTimeoutSeconds, ct)
                 .ConfigureAwait(false);
 
             // The export writers key each cell by the column-name list they're given (which here is
@@ -282,12 +288,15 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
-            if (name is null)
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, request.QueryParameters, allowParameterized: true,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetChartResult(DatasetChartOutcome.NotFound);
-
-            var cols = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            var columnTypes = cols.Types;
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
+                return new DatasetChartResult(DatasetChartOutcome.InvalidRequest, ErrorDetail: resolved.Error);
+            var src = resolved.Source!;
+            var columnTypes = src.ColumnTypes;
 
             if (string.IsNullOrWhiteSpace(request.CategoryColumn) || !columnTypes.ContainsKey(request.CategoryColumn))
                 return new DatasetChartResult(DatasetChartOutcome.InvalidRequest,
@@ -315,23 +324,20 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
                 return new DatasetChartResult(DatasetChartOutcome.InvalidRequest, ErrorDetail: where.Error);
 
             parameters.Add("p_chart_limit", MaxChartCategories);
-            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
             // Cast the aggregate to double so any numeric type binds uniformly; cast the
             // category to text for a stable label. Largest categories first, then by label.
-            var sql =
+            var sql = src.WithClause +
                 $"SELECT {catQ}::text AS category, CAST({aggExpr} AS double precision) AS value " +
-                $"FROM {viewRef}{where.Where} GROUP BY {catQ} " +
+                $"FROM {src.Relation}{where.Where} GROUP BY {catQ} " +
                 "ORDER BY value DESC NULLS LAST, category LIMIT @p_chart_limit";
 
             try
             {
-                var raw = await conn.QueryAsync(new CommandDefinition(
-                    sql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))
+                var raw = await QueryRowsAsync(conn, sql, parameters, src, CommandTimeoutSeconds, ct)
                     .ConfigureAwait(false);
                 var points = raw
-                    .Cast<IDictionary<string, object>>()
                     .Select(r => new DatasetChartPoint(
-                        r.TryGetValue("category", out var c) && c is not null and not DBNull
+                        r.TryGetValue("category", out var c) && c is not null
                             ? Convert.ToString(c, CultureInfo.InvariantCulture) ?? string.Empty
                             : string.Empty,
                         r.TryGetValue("value", out var v) && v is double d ? d : 0d))
@@ -361,12 +367,15 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
-            if (name is null)
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, request.QueryParameters, allowParameterized: true,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetTreeLevelResult(DatasetRowsOutcome.NotFound);
-
-            var cols = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            var columnTypes = cols.Types;
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
+                return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: resolved.Error);
+            var src = resolved.Source!;
+            var columnTypes = src.ColumnTypes;
             if (!columnTypes.ContainsKey(request.KeyColumn))
                 return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest,
                     ErrorDetail: $"Unknown key column '{request.KeyColumn}'.");
@@ -379,14 +388,14 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
                 return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest,
                     ErrorDetail: $"Unknown auth filter column '{afCheck.Column}'.");
 
-            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
+            var viewRef = src.Relation;
             var parameters = new DynamicParameters();
 
             // Level WHERE = parent predicate (+ optional search OR across all columns) +
             // server-resolved auth scope. Built as one FilterGroupDto so DatasetFilterWhereBuilder
             // handles value coercion/parameterisation; its predicates are unqualified and resolve
             // to the outer "t" relation (the EXISTS subquery below has its own alias "c").
-            var group = BuildTreeLevelFilterGroup(request, cols.Order);
+            var group = BuildTreeLevelFilterGroup(request, src.ColumnOrder);
             var where = DatasetFilterWhereBuilder.Build(group, columnTypes, parameters, authFilter);
             if (!where.IsValid)
                 return new DatasetTreeLevelResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: where.Error);
@@ -411,12 +420,12 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
             parameters.Add("p_limit", pageSize + 1);
             parameters.Add("p_offset", (long)(page - 1) * pageSize);
 
-            var selectList = string.Join(", ", cols.Order.Select(c => $"t.{QuoteIdentifier(c)}"));
-            var sql =
+            var selectList = string.Join(", ", src.ColumnOrder.Select(c => $"t.{QuoteIdentifier(c)}"));
+            var sql = src.WithClause +
                 $"SELECT {selectList}, {hasChildren} FROM {viewRef} t{where.Where}{orderBy} " +
                 "LIMIT @p_limit OFFSET @p_offset";
 
-            var rows = await QueryRowsAsync(conn, sql, parameters, CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            var rows = await QueryRowsAsync(conn, sql, parameters, src, CommandTimeoutSeconds, ct).ConfigureAwait(false);
             var hasNextPage = rows.Count > pageSize;
             if (hasNextPage) rows.RemoveAt(rows.Count - 1);
 
@@ -436,12 +445,18 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = await ResolveDatasetNameAsync(conn, datasetId, ct).ConfigureAwait(false);
-            if (name is null)
+            // Tree descendants does not carry runtime placeholder values, so a parameterized
+            // dataset resolves to MissingParameters → InvalidRequest here (TreeView on a
+            // parameterized query is unsupported); placeholder-free query + view types work.
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, queryParametersJson: null, allowParameterized: true,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetTreeDescendantsResult(DatasetRowsOutcome.NotFound);
-
-            var cols = await GetViewColumnsAsync(conn, name, ct).ConfigureAwait(false);
-            var columnTypes = cols.Types;
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
+                return new DatasetTreeDescendantsResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: resolved.Error);
+            var src = resolved.Source!;
+            var columnTypes = src.ColumnTypes;
             if (!columnTypes.ContainsKey(keyColumn))
                 return new DatasetTreeDescendantsResult(DatasetRowsOutcome.InvalidRequest,
                     ErrorDetail: $"Unknown key column '{keyColumn}'.");
@@ -454,7 +469,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
                 return new DatasetTreeDescendantsResult(DatasetRowsOutcome.InvalidRequest,
                     ErrorDetail: $"Unknown auth filter column '{afc.Column}'.");
 
-            var viewRef = $"datasets.{QuoteIdentifier(name.Value)}";
+            var viewRef = src.Relation;
             var kc = QuoteIdentifier(keyColumn);
             var pc = QuoteIdentifier(parentColumn);
 
@@ -478,18 +493,21 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
                 authRec = $" AND c.{ac} = @p_auth";
             }
 
-            // UNION (not UNION ALL) dedups in case the dataset is not a strict tree.
+            // UNION (not UNION ALL) dedups in case the dataset is not a strict tree. For a
+            // query-type source the dataset's own CTE is composed into the same WITH RECURSIVE
+            // list (RECURSIVE may precede a non-recursive CTE — _ds — without issue).
             var sql =
-                $"WITH RECURSIVE d AS (" +
+                "WITH RECURSIVE " +
+                (src.CteDefinition.Length > 0 ? src.CteDefinition + ", " : string.Empty) +
+                "d AS (" +
                 $"SELECT {kc} AS k FROM {viewRef} WHERE {pc} = @p_parent{authAnchor} " +
                 $"UNION SELECT c.{kc} FROM {viewRef} c JOIN d ON c.{pc} = d.k{authRec}" +
-                $") SELECT k FROM d";
+                ") SELECT k FROM d";
 
-            var raw = await conn.QueryAsync(new CommandDefinition(
-                sql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)).ConfigureAwait(false);
+            var raw = await QueryRowsAsync(conn, sql, parameters, src, CommandTimeoutSeconds, ct)
+                .ConfigureAwait(false);
             var ids = raw
-                .Cast<IDictionary<string, object>>()
-                .Select(r => r.TryGetValue("k", out var v) && v is not null and not DBNull
+                .Select(r => r.TryGetValue("k", out var v) && v is not null
                     ? Convert.ToString(v, CultureInfo.InvariantCulture) ?? string.Empty
                     : string.Empty)
                 .Where(s => s.Length > 0)
@@ -548,14 +566,14 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
             : null;
 
     private static (List<string> Columns, string? Error) ResolveSelectColumns(
-        List<string>? requested, ColumnSet cols)
+        List<string>? requested, IReadOnlyList<string> order, IReadOnlyDictionary<string, string> types)
     {
         if (requested is not { Count: > 0 })
-            return ([.. cols.Order], null);
+            return ([.. order], null);
         var selected = new List<string>();
         foreach (var c in requested)
         {
-            if (string.IsNullOrWhiteSpace(c) || !cols.Types.ContainsKey(c))
+            if (string.IsNullOrWhiteSpace(c) || !types.ContainsKey(c))
                 return ([], $"Unknown column '{c}'.");
             selected.Add(c);
         }
@@ -578,59 +596,77 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         return parts.Count == 0 ? (string.Empty, null) : (" ORDER BY " + string.Join(", ", parts), null);
     }
 
+    // Executes a SELECT against a resolved dataset source, binding the filter parameters
+    // (typed, via AddWithValue) and the source's {_placeholder} parameters (as `unknown`-typed
+    // so they coerce like literals). Returns the rows as ordinal-keyed dictionaries. Used for
+    // every read path so view and query (CTE) sources execute through one binding routine.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100",
+        Justification = "SQL is built from validated identifiers + the SELECT-validated dataset "
+            + "query; all values (filters + placeholders) are bound parameters, never concatenated.")]
     private static async Task<List<IDictionary<string, object?>>> QueryRowsAsync(
-        Npgsql.NpgsqlConnection conn, string sql, DynamicParameters parameters, int timeout, CancellationToken ct)
+        NpgsqlConnection conn, string sql, DynamicParameters parameters,
+        DatasetResolvedSource src, int timeout, CancellationToken ct)
     {
-        var raw = await conn.QueryAsync(new CommandDefinition(
-            sql, parameters, commandTimeout: timeout, cancellationToken: ct)).ConfigureAwait(false);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = timeout;
+        BindParameters(cmd, parameters, src);
+
+        using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         var result = new List<IDictionary<string, object?>>();
-        foreach (var row in raw.Cast<IDictionary<string, object>>())
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
             var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
-            foreach (var kv in row)
-                dict[kv.Key] = kv.Value is DBNull ? null : kv.Value;
+            for (var i = 0; i < reader.FieldCount; i++)
+            {
+                var v = reader.GetValue(i);
+                dict[reader.GetName(i)] = v is DBNull ? null : v;
+            }
             result.Add(dict);
         }
         return result;
     }
 
-    private static async Task<DatasetName?> ResolveDatasetNameAsync(
-        Npgsql.NpgsqlConnection conn, Guid id, CancellationToken ct)
+    // COUNT(*)-style scalar with the same dual parameter binding as QueryRowsAsync.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100",
+        Justification = "SQL is built from validated identifiers + the SELECT-validated dataset "
+            + "query; all values (filters + placeholders) are bound parameters, never concatenated.")]
+    private static async Task<long> ScalarLongAsync(
+        NpgsqlConnection conn, string sql, DynamicParameters parameters,
+        DatasetResolvedSource src, int timeout, CancellationToken ct)
     {
-        var rawName = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
-            "SELECT dataset_name FROM custom_dataset WHERE id = @id",
-            new { id }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))
-            .ConfigureAwait(false);
-        if (rawName is null)
-            return null;
-        return DatasetName.TryCreate(rawName, out var name, out _) ? name : null;
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = timeout;
+        BindParameters(cmd, parameters, src);
+        var scalar = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        return scalar is null or DBNull ? 0L : Convert.ToInt64(scalar, CultureInfo.InvariantCulture);
     }
 
-    // The dataset VIEW's columns: an ordinal-ordered name list (for the default projection)
-    // plus a name → information_schema data_type map (for filter value coercion + validation).
-    private sealed record ColumnSet(IReadOnlyList<string> Order, IReadOnlyDictionary<string, string> Types);
-
-    private static async Task<ColumnSet> GetViewColumnsAsync(
-        Npgsql.NpgsqlConnection conn, DatasetName name, CancellationToken ct)
+    // Binds the Dapper filter parameters (already typed by DatasetFilterWhereBuilder.Coerce)
+    // and the source's placeholder parameters. Placeholder values are bound as PostgreSQL
+    // `unknown`-typed (string form) so they coerce contextually like an inline literal —
+    // a plain text param would not (e.g. uuid = text has no operator).
+    private static void BindParameters(
+        NpgsqlCommand cmd, DynamicParameters? filterParams, DatasetResolvedSource src)
     {
-        var rows = await conn.QueryAsync<(string ColumnName, string DataType)>(new CommandDefinition(
-            """
-            SELECT column_name AS "ColumnName", data_type AS "DataType"
-            FROM information_schema.columns
-            WHERE table_schema = 'datasets' AND table_name = @name
-            ORDER BY ordinal_position
-            """,
-            new { name = name.Value }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))
-            .ConfigureAwait(false);
-
-        var order = new List<string>();
-        var map = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var (col, type) in rows)
+        if (filterParams is not null)
         {
-            order.Add(col);
-            map[col] = type;
+            foreach (var pn in filterParams.ParameterNames)
+                cmd.Parameters.AddWithValue(pn, filterParams.Get<object>(pn) ?? DBNull.Value);
         }
-        return new ColumnSet(order, map);
+
+        foreach (var (name, value) in src.NamedParameters)
+        {
+            cmd.Parameters.Add(new NpgsqlParameter
+            {
+                ParameterName = name,
+                NpgsqlDbType = NpgsqlDbType.Unknown,
+                Value = value is null
+                    ? DBNull.Value
+                    : Convert.ToString(value, CultureInfo.InvariantCulture) ?? (object)DBNull.Value,
+            });
+        }
     }
 
     private static string QuoteIdentifier(string identifier) =>

@@ -15,6 +15,10 @@
   --primary-active: color-mix(in oklab, var(--primary) 84%, var(--primary-foreground));
   --accent-hover: color-mix(in oklab, var(--accent) 90%, var(--accent-foreground));
   --accent-active: color-mix(in oklab, var(--accent) 84%, var(--accent-foreground));
+  /* Slim scrollbars — tinted from each theme's own muted-foreground so the bar
+     carries the theme's hue/chroma and adapts automatically (light + dark). */
+  --scrollbar-thumb: color-mix(in oklab, var(--muted-foreground) 40%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
 }
 
 [data-theme='nord'] {

@@ -69,6 +69,36 @@
   html {
     @apply font-sans;
     }
+
+  /* Slim, theme-tinted scrollbars. Firefox uses scrollbar-width/-color;
+     Chromium/WebKit uses the ::-webkit-scrollbar pseudo-elements below. The
+     thumb color comes from --scrollbar-thumb (themes.css), so it follows the
+     active [data-theme] automatically. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+    }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+    }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+    }
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb);
+    border-radius: 9999px;
+    /* Transparent border inset keeps the thumb visually slim while staying
+       easy to grab. background-clip lets the border show the track through. */
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover);
+    }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+    }
 }
 
 /* React Flow canvas chrome — make the zoom/fit Controls (and MiniMap) follow the

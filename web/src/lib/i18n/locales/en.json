@@ -504,6 +504,11 @@
       "saveButton": "Save",
       "cancelButton": "Cancel",
       "fieldName": "Dataset Name",
+      "fieldQueryType": "Query Type",
+      "queryTypeView": "View",
+      "queryTypeQuery": "Query",
+      "queryTypeViewHint": "Creates a database view. Usable everywhere (dropdowns, tables, CRUD).",
+      "queryTypeQueryHint": "Stored as a parameterized query — no database view. A query with {_placeholders} can only be used by the designer's Dataset element.",
       "fieldMode": "Mode",
       "modeCustomQuery": "Custom Query",
       "modeQueryBuilder": "Query Builder",
@@ -656,6 +661,12 @@
     "previewTimeout": "Preview query exceeded the time limit. Simplify the query or add filters.",
     "previewDialogTitle": "Query Preview",
     "previewLoading": "Running preview…",
+    "parametersRequired": "This query needs parameter values. Provide a value for every placeholder.",
+    "parameters": {
+      "title": "Query Parameters",
+      "description": "This query contains placeholders. Enter a value for each before previewing.",
+      "runButton": "Run Preview"
+    },
     "validation": {
       "required": "Dataset name is required.",
       "tooLong": "Dataset name must be 63 characters or fewer.",
@@ -1138,6 +1149,8 @@
       },
       "help": {
         "datasetFilterable": "Drag input fields into the component on the canvas, then bind each condition's value to one of their field keys.",
+        "datasetParameterized": "This is a parameterized query. Add a condition for each parameter below and bind its value to a filter input's field key.",
+        "datasetUnmappedParameters": "Unmapped parameters: {{params}}. Add a condition for each and bind it to a filter input.",
         "datasetNoConditions": "No conditions yet — add one to filter the dataset.",
         "chartValue": "The numeric column to aggregate. Ignored for Count.",
         "authFilterColumn": "Optional. Scopes every view to rows whose value in this column equals the current user. Pick the column that holds the user id; leave as “No filter” to show all rows.",

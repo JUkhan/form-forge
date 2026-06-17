@@ -1,11 +1,17 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import type { ChangeEvent, ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { MousePointerClick } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { getFieldKey, type DesignerElement } from '@/types/designer'
 import { designerApi } from '@/features/designer/designerApi'
-import { listDatasets, getDatasetColumns, getDatasetColumnsByName } from '@/features/datasets/datasetApi'
+import {
+  listDatasets,
+  getDataset,
+  getDatasetColumns,
+  getDatasetColumnsByName,
+} from '@/features/datasets/datasetApi'
+import { extractPlaceholders } from '@/features/datasets/queryParameters'
 import { useDesignerCanvasStore } from '@/store/designerCanvas'
 import { cn } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
@@ -125,15 +131,23 @@ function BoolField({
   label,
   checked,
   onChange,
+  disabled,
 }: {
   label: string
   checked: boolean
   onChange: (v: boolean) => void
+  disabled?: boolean
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+    <label
+      className={cn(
+        'flex items-center gap-2 text-xs text-muted-foreground',
+        disabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer',
+      )}
+    >
       <Checkbox
         checked={checked}
+        disabled={disabled}
         onCheckedChange={(v) => onChange(v === true)}
       />
       {label}
@@ -1668,9 +1682,35 @@ function DatasetComponentFields({
   const columns = columnsQuery.data?.columns ?? []
   const columnsReady = datasetId !== ''
 
+  // Parameterized-query feature — load the dataset's query type + SQL so the inspector can
+  // detect a parameterized "query" datasource and require its placeholders be mapped.
+  const datasetDetailQuery = useQuery({
+    queryKey: ['dataset', 'detail', datasetId],
+    queryFn: () => getDataset(datasetId),
+    enabled: datasetId !== '',
+    staleTime: 60_000,
+  })
+  const placeholders = useMemo(
+    () => extractPlaceholders(datasetDetailQuery.data?.query),
+    [datasetDetailQuery.data?.query],
+  )
+  const isParameterized =
+    datasetDetailQuery.data?.queryType === 'query' && placeholders.length > 0
+
   const fieldKeys = collectDescendantFieldKeys(element.children)
   const filterGroup = parseDatasetFilter(p.filterConditions)
   const tableColumns = parseTableColumns(p.tableColumns)
+
+  // A parameterized datasource is implicitly filterable (its placeholders bind to filter
+  // inputs); the runtime treats it as such without persisting the flag.
+  // Placeholders still missing a bound filter condition (columnName = placeholder + a value
+  // field). Until this is empty, the parameterized datasource isn't fully wired.
+  const unmappedPlaceholders = isParameterized
+    ? placeholders.filter(
+        (ph) =>
+          !filterGroup.items.some((c) => c.columnName === ph && c.valueFieldKey !== ''),
+      )
+    : []
 
   const datasetsDisabled = datasetsQuery.isLoading || datasetsQuery.isError
   const datasetPlaceholder = datasetsQuery.isLoading
@@ -1744,20 +1784,39 @@ function DatasetComponentFields({
 
       <BoolField
         label={t('designer.inspector.fields.filterable')}
-        checked={filterable}
+        checked={filterable || isParameterized}
+        // A parameterized datasource is always filterable (its placeholders bind to filter
+        // inputs), so the toggle is locked on.
+        disabled={isParameterized}
         onChange={(v) => updateProp(id, 'filterable', v)}
       />
-      {filterable && (
+      {isParameterized && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">
+          {t('designer.inspector.help.datasetParameterized')}
+          {unmappedPlaceholders.length > 0 && (
+            <span className="mt-1 block font-medium text-destructive">
+              {t('designer.inspector.help.datasetUnmappedParameters', {
+                params: unmappedPlaceholders.join(', '),
+              })}
+            </span>
+          )}
+        </div>
+      )}
+      {(filterable || isParameterized) && (
         <>
-          <span className="text-[10px] text-muted-foreground">
-            {t('designer.inspector.help.datasetFilterable')}
-          </span>
+          {!isParameterized && (
+            <span className="text-[10px] text-muted-foreground">
+              {t('designer.inspector.help.datasetFilterable')}
+            </span>
+          )}
+          {/* For a parameterized dataset the condition columns ARE the {_placeholder} names
+              (each maps a placeholder to a filter input); otherwise they are the VIEW columns. */}
           <DatasetFilterConditionsField
             group={filterGroup}
-            columns={columns}
+            columns={isParameterized ? placeholders : columns}
             fieldKeys={fieldKeys}
-            columnsReady={columnsReady}
-            columnsLoading={columnsQuery.isLoading}
+            columnsReady={isParameterized ? true : columnsReady}
+            columnsLoading={isParameterized ? false : columnsQuery.isLoading}
             onChange={(next) => updateProp(id, 'filterConditions', next)}
           />
         </>

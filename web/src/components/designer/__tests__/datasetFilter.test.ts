@@ -6,6 +6,7 @@ import {
   removeCondition,
   resolveDatasetFilter,
   setCombinator,
+  splitResolvedFilter,
   updateCondition,
   type DatasetFilterGroup,
 } from '../datasetFilter'
@@ -94,5 +95,49 @@ describe('resolveDatasetFilter', () => {
       { id: 'c1', kind: 'condition', columnName: 'salary', operator: 'BETWEEN', valueFieldKey: 's' },
     ])
     expect(resolveDatasetFilter(g, { s: '50' })).toBeNull()
+  })
+})
+
+describe('splitResolvedFilter (parameterized queries)', () => {
+  it('passes the filter through unchanged when there are no placeholders', () => {
+    const g = groupWith([
+      { id: 'c1', kind: 'condition', columnName: 'name', operator: '=', valueFieldKey: 'q' },
+    ])
+    const resolved = resolveDatasetFilter(g, { q: 'Alice' })
+    const { filters, queryParameters } = splitResolvedFilter(resolved, [])
+    expect(filters).toBe(resolved)
+    expect(queryParameters).toBeUndefined()
+  })
+
+  it('routes placeholder conditions into queryParameters and keeps the rest as filters', () => {
+    const g = groupWith([
+      { id: 'c1', kind: 'condition', columnName: '_age', operator: '=', valueFieldKey: 'age' },
+      { id: 'c2', kind: 'condition', columnName: 'dept', operator: '=', valueFieldKey: 'd' },
+    ])
+    const resolved = resolveDatasetFilter(g, { age: '23', d: 'Eng' })
+    const { filters, queryParameters } = splitResolvedFilter(resolved, ['_age'])
+
+    expect(queryParameters).toBe(JSON.stringify({ _age: '23' }))
+    expect(filters).not.toBeNull()
+    expect(filters!.items).toHaveLength(1)
+    expect(filters!.items[0].columnName).toBe('dept')
+  })
+
+  it('returns null filters when every condition is a placeholder binding', () => {
+    const g = groupWith([
+      { id: 'c1', kind: 'condition', columnName: '_age', operator: '=', valueFieldKey: 'age' },
+      { id: 'c2', kind: 'condition', columnName: '_name', operator: '=', valueFieldKey: 'nm' },
+    ])
+    const resolved = resolveDatasetFilter(g, { age: '23', nm: 'Carol' })
+    const { filters, queryParameters } = splitResolvedFilter(resolved, ['_age', '_name'])
+
+    expect(filters).toBeNull()
+    expect(queryParameters).toBe(JSON.stringify({ _age: '23', _name: 'Carol' }))
+  })
+
+  it('handles a null resolved filter', () => {
+    const { filters, queryParameters } = splitResolvedFilter(null, ['_age'])
+    expect(filters).toBeNull()
+    expect(queryParameters).toBeUndefined()
   })
 })

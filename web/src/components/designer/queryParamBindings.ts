@@ -4,6 +4,7 @@
 // "this placeholder gets its value from this field". Extra WHERE conditions on the dataset's
 // output columns stay in datasetFilter.ts.
 
+import { uid } from '@/lib/utils'
 import type { DesignerElement } from '@/types/designer'
 
 export type QueryParamBinding = {
@@ -12,10 +13,8 @@ export type QueryParamBinding = {
   valueFieldKey: string // '' until bound; the field key whose value fills the placeholder
 }
 
-let idCounter = 0
 export function newBindingId(): string {
-  idCounter += 1
-  return `qpb-${idCounter}`
+  return uid('qpb')
 }
 
 // Normalize a persisted/unknown value into a well-formed binding list. Anything malformed

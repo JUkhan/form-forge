@@ -126,6 +126,12 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
     () => parseQueryParamBindings(p.queryParamBindings),
     [p.queryParamBindings],
   )
+  // `detailQuery` resolves async, so on the first render `isParameterized` is still false and
+  // the row/chart fetch below would otherwise fire an unparameterized request (a 422) before
+  // we learn the dataset needs params. Param bindings are saved on the element (the designer
+  // blocks saving until every placeholder is mapped), so their presence is a synchronous
+  // signal that lets us hold the first fetch without slowing down non-parameterized datasets.
+  const needsParams = isParameterized || paramBindings.length > 0
 
   // Chart config (shared across all enabled chart types).
   const chartCategory = typeof p.chartCategory === 'string' ? p.chartCategory : ''
@@ -150,7 +156,9 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
 
   // Filter-form state (local — the filter inputs are this view's, not the outer form's).
   const [filterValues, setFilterValues] = useState<Record<string, unknown>>({})
-  const [filterOpen, setFilterOpen] = useState(false)
+  // null = no explicit user choice yet, so the panel falls back to its default-open rule
+  // (open for a parameterized dataset). Once the user toggles, their choice sticks.
+  const [userFilterOpen, setUserFilterOpen] = useState<boolean | null>(null)
   // The filter actually in effect (set on Apply / Clear). Kept separate from the live
   // form values so typing in the form doesn't refetch on every keystroke.
   const [appliedFilter, setAppliedFilter] = useState<unknown>(null)
@@ -162,9 +170,11 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
   const [exporting, setExporting] = useState(false)
 
   // A parameterized dataset is implicitly filterable (its placeholders bind to filter
-  // inputs), and its filter panel stays open so the user can supply those values.
+  // inputs) and defaults its panel open so the user can supply the placeholder values.
+  // The toggle button reads `filterOpen` too, so it always reflects the panel state.
   const effectiveFilterable = filterable || isParameterized
-  const showFilterPanel = effectiveFilterable && (filterOpen || isParameterized)
+  const filterOpen = userFilterOpen ?? isParameterized
+  const showFilterPanel = effectiveFilterable && filterOpen
 
   const filterInteractive = useMemo<InteractiveFormProps>(
     () => ({
@@ -194,7 +204,7 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
     enabled:
       datasetId !== '' &&
       activeView === 'table' &&
-      (!isParameterized || appliedParams !== undefined),
+      (!needsParams || appliedParams !== undefined),
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   })
@@ -205,7 +215,18 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
     [tableColumns, dataColumns],
   )
 
+  // For a parameterized dataset, every {_placeholder} must have a non-empty bound value
+  // before the filter can be applied (the server rejects a missing parameter). Mirrors
+  // resolveQueryParameters, which returns undefined until all params are supplied.
+  const paramsReady = useMemo(
+    () =>
+      !isParameterized ||
+      resolveQueryParameters(paramBindings, placeholders, filterValues) !== undefined,
+    [isParameterized, paramBindings, placeholders, filterValues],
+  )
+
   function applyFilter() {
+    if (!paramsReady) return
     // Filter conditions filter the dataset's output columns; the query parameters bind the
     // {_placeholder} values — resolved separately from their own bindings.
     setAppliedFilter(resolveDatasetFilter(filterGroup, filterValues))
@@ -289,7 +310,7 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
                 size="sm"
                 className="h-7 gap-1 text-xs"
                 aria-pressed={filterOpen}
-                onClick={() => setFilterOpen((o) => !o)}
+                onClick={() => setUserFilterOpen(!filterOpen)}
               >
                 <Filter className="h-4 w-4" />
                 {t('dataset.filter')}
@@ -335,13 +356,22 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
               interactiveProps={filterInteractive}
             />
           ))}
-          <div className="flex gap-2">
-            <Button type="button" size="sm" className="h-7 text-xs" onClick={applyFilter}>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={applyFilter}
+              disabled={!paramsReady}
+            >
               {t('dataset.applyFilter')}
             </Button>
             <Button type="button" variant="outline" size="sm" className="h-7 text-xs" onClick={clearFilter}>
               {t('dataset.clearFilter')}
             </Button>
+            {!paramsReady && (
+              <span className="text-[11px] text-muted-foreground">{t('dataset.paramsRequired')}</span>
+            )}
           </div>
         </div>
       )}
@@ -358,49 +388,52 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
           <p className="px-2 py-4 text-center text-xs text-destructive">{t('dataset.loadError')}</p>
         ) : (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-border">
-                    {visibleColumns.map((c) => {
-                      const active = sortCol?.column === c.column
-                      return (
-                        <th key={c.column} className="px-2 py-1.5 text-left font-medium text-muted-foreground">
-                          <button
-                            type="button"
-                            onClick={() => toggleSort(c.column)}
-                            className="flex items-center gap-1 hover:text-foreground"
-                          >
-                            {c.header}
-                            {active && (sortCol.direction === 'asc'
-                              ? <ArrowUp className="h-3 w-3" />
-                              : <ArrowDown className="h-3 w-3" />)}
-                          </button>
-                        </th>
-                      )
-                    })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.length === 0 ? (
-                    <tr>
-                      <td colSpan={Math.max(1, visibleColumns.length)} className="px-2 py-6 text-center text-muted-foreground">
-                        {t('dataset.noRows')}
-                      </td>
+            <div className="overflow-hidden rounded-lg border border-border">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-muted text-left">
+                      {visibleColumns.map((c) => {
+                        const active = sortCol?.column === c.column
+                        return (
+                          <th key={c.column} className="px-3 py-2">
+                            <button
+                              type="button"
+                              onClick={() => toggleSort(c.column)}
+                              aria-sort={active ? (sortCol.direction === 'desc' ? 'descending' : 'ascending') : 'none'}
+                              className="flex items-center gap-1 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                            >
+                              {c.header}
+                              {active && (sortCol.direction === 'asc'
+                                ? <ArrowUp className="h-3 w-3" />
+                                : <ArrowDown className="h-3 w-3" />)}
+                            </button>
+                          </th>
+                        )
+                      })}
                     </tr>
-                  ) : (
-                    rows.map((row, i) => (
-                      <tr key={i} className="border-b border-border/60">
-                        {visibleColumns.map((c) => (
-                          <td key={c.column} className="px-2 py-1.5 text-foreground">
-                            {formatCell(row[c.column])}
-                          </td>
-                        ))}
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {rows.length === 0 ? (
+                      <tr>
+                        <td colSpan={Math.max(1, visibleColumns.length)} className="px-3 py-8 text-center text-muted-foreground">
+                          {t('dataset.noRows')}
+                        </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ) : (
+                      rows.map((row, i) => (
+                        <tr key={i} className="hover:bg-overlay-hover">
+                          {visibleColumns.map((c) => (
+                            <td key={c.column} className="px-3 py-2 text-foreground">
+                              {formatCell(row[c.column])}
+                            </td>
+                          ))}
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             {/* Pagination */}
@@ -430,7 +463,7 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
           filters={appliedFilter}
           authFilterColumn={authFilterColumn}
           queryParameters={appliedParams}
-          paramsReady={!isParameterized || appliedParams !== undefined}
+          paramsReady={!needsParams || appliedParams !== undefined}
         />
       )}
     </div>

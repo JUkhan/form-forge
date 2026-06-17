@@ -639,6 +639,7 @@
     "filter": "Filter",
     "applyFilter": "Apply",
     "clearFilter": "Clear",
+    "paramsRequired": "Fill in all required parameters to apply.",
     "noViewEnabled": "Enable Table view to show data.",
     "loadError": "Failed to load data.",
     "noRows": "No matching rows.",

@@ -159,34 +159,3 @@ export function resolveDatasetFilter(
   if (items.length === 0) return null
   return { id: group.id, kind: 'group', combinator: group.combinator, items }
 }
-
-// Parameterized-query feature — split a resolved filter into (a) the queryParameters JSON
-// for a parameterized "query"-type dataset (conditions whose columnName is a {_placeholder})
-// and (b) the remaining conditions, which stay output-column WHERE filters. The placeholder
-// value is the resolved scalar (first element for list/range operators). Returns the params
-// as a JSON object string (or undefined when none), so the caller passes it straight to the
-// rows/chart/export request.
-export function splitResolvedFilter(
-  resolved: ResolvedFilterGroup | null,
-  placeholders: readonly string[],
-): { filters: ResolvedFilterGroup | null; queryParameters: string | undefined } {
-  if (!resolved) return { filters: null, queryParameters: undefined }
-  if (placeholders.length === 0) return { filters: resolved, queryParameters: undefined }
-
-  const placeholderSet = new Set(placeholders)
-  const params: Record<string, string> = {}
-  const rest: ResolvedCondition[] = []
-  for (const c of resolved.items) {
-    if (placeholderSet.has(c.columnName)) {
-      const scalar = Array.isArray(c.value) ? (c.value[0] ?? '') : (c.value ?? '')
-      params[c.columnName] = String(scalar)
-    } else {
-      rest.push(c)
-    }
-  }
-
-  const filters = rest.length > 0 ? { ...resolved, items: rest } : null
-  const queryParameters =
-    Object.keys(params).length > 0 ? JSON.stringify(params) : undefined
-  return { filters, queryParameters }
-}

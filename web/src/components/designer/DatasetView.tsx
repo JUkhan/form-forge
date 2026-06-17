@@ -47,7 +47,8 @@ import {
 } from '@/features/datasets/datasetApi'
 import { extractPlaceholders } from '@/features/datasets/queryParameters'
 import ElementRenderer, { type InteractiveFormProps } from './ElementRenderer'
-import { parseDatasetFilter, resolveDatasetFilter, splitResolvedFilter } from './datasetFilter'
+import { parseDatasetFilter, resolveDatasetFilter } from './datasetFilter'
+import { parseQueryParamBindings, resolveQueryParameters } from './queryParamBindings'
 import { parseTableColumns, resolveVisibleColumns } from './datasetTable'
 
 const PAGE_SIZE = 25
@@ -121,6 +122,10 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
     [detailQuery.data?.query],
   )
   const isParameterized = detailQuery.data?.queryType === 'query' && placeholders.length > 0
+  const paramBindings = useMemo(
+    () => parseQueryParamBindings(p.queryParamBindings),
+    [p.queryParamBindings],
+  )
 
   // Chart config (shared across all enabled chart types).
   const chartCategory = typeof p.chartCategory === 'string' ? p.chartCategory : ''
@@ -201,10 +206,10 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
   )
 
   function applyFilter() {
-    const resolved = resolveDatasetFilter(filterGroup, filterValues)
-    const { filters, queryParameters } = splitResolvedFilter(resolved, placeholders)
-    setAppliedFilter(filters)
-    setAppliedParams(queryParameters)
+    // Filter conditions filter the dataset's output columns; the query parameters bind the
+    // {_placeholder} values — resolved separately from their own bindings.
+    setAppliedFilter(resolveDatasetFilter(filterGroup, filterValues))
+    setAppliedParams(resolveQueryParameters(paramBindings, placeholders, filterValues))
     setPage(1)
   }
   function clearFilter() {

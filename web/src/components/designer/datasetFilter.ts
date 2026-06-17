@@ -4,6 +4,7 @@
 // that input, not typed at design time). Phase 1 keeps a single root group (flat list of
 // conditions joined by one AND/OR) — the group shape is forward-compatible with nesting.
 
+import { uid } from '@/lib/utils'
 import type { FilterOperator } from '@/features/datasets/types/builderState'
 
 export type DatasetFilterCondition = {
@@ -37,10 +38,8 @@ export const EMPTY_DATASET_FILTER: DatasetFilterGroup = {
   items: [],
 }
 
-let idCounter = 0
 export function newConditionId(): string {
-  idCounter += 1
-  return `dfc-${idCounter}`
+  return uid('dfc')
 }
 
 // Normalize a persisted/unknown value into a well-formed DatasetFilterGroup. Anything

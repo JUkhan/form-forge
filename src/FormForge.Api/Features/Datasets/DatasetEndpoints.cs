@@ -354,6 +354,17 @@ internal static class DatasetEndpoints
                             ["code"] = "BUILDER_STATE_INVALID",
                             ["messageKey"] = "datasets.builderStateInvalid",
                         });
+                case PreviewOutcome.MissingParameters:
+                    return Results.Problem(
+                        detail: result.ErrorMessage,
+                        title: "Parameters required",
+                        statusCode: StatusCodes.Status422UnprocessableEntity,
+                        extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
+                        {
+                            ["code"] = "DATASET_PARAMETERS_REQUIRED",
+                            ["messageKey"] = "datasets.parametersRequired",
+                            ["missingParameters"] = result.MissingParameters,
+                        });
                 case PreviewOutcome.SqlError:
                     return Results.Problem(
                         detail: result.ErrorMessage,

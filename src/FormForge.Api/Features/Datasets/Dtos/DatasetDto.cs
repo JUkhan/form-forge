@@ -11,4 +11,5 @@ internal sealed record DatasetDto(
     string? BuilderState,
     int Version,
     DateTimeOffset CreatedAt,
-    Guid? CreatedBy);
+    Guid? CreatedBy,
+    string QueryType);

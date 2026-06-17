@@ -16,6 +16,11 @@ export interface PagedResult<T> {
   totalPages: number
 }
 
+// Parameterized-query feature — "view" materializes a backing VIEW (legacy default);
+// "query" stores the SQL as a record only (no VIEW). A "query" whose SQL contains
+// {_placeholder} tokens is a parameterized query (Dataset palette only).
+export type DatasetQueryType = 'view' | 'query'
+
 // Mirrors DatasetSummaryDto.cs — list projection (no query/builderState/version)
 export interface DatasetSummary {
   id: string
@@ -24,6 +29,7 @@ export interface DatasetSummary {
   createdAt: string // ISO-8601
   updatedAt: string | null
   createdByName: string | null
+  queryType: DatasetQueryType
 }
 
 // Mirrors DatasetDto.cs — full shape returned by GET /{id}, POST, PUT
@@ -36,6 +42,7 @@ export interface DatasetDetail {
   version: number // optimistic concurrency token (Decision 6.4)
   createdAt: string
   createdBy: string | null
+  queryType: DatasetQueryType
 }
 
 export interface CreateDatasetPayload {
@@ -46,6 +53,8 @@ export interface CreateDatasetPayload {
   // the server re-derives SQL from it (CreateAsync checkpoint b). The current UI never
   // sends one (datasets are created in placeholder mode, then saved from the canvas).
   builderState?: string | null
+  // Null/omitted defaults to "view" server-side.
+  queryType?: DatasetQueryType
 }
 
 // version is REQUIRED — omitting it causes a 400 (UpdateDatasetRequest.cs has non-nullable int Version)
@@ -55,6 +64,8 @@ export interface UpdateDatasetPayload {
   query?: string | null
   builderState?: string | null
   version: number
+  // Omitted keeps the existing value; changing it triggers a VIEW create/drop server-side.
+  queryType?: DatasetQueryType
 }
 
 export interface ListDatasetsParams {
@@ -101,6 +112,12 @@ export interface PreviewDatasetPayload {
   isCustomQuery: boolean
   query?: string | null
   builderState?: string | null
+  // Parameterized-query feature — for queryType "query" the raw query may contain
+  // {_placeholder} tokens; queryParameters is a JSON object string mapping each placeholder
+  // name to its value. condition, when non-empty, is applied as an extra WHERE clause.
+  queryType?: DatasetQueryType
+  queryParameters?: string
+  condition?: string
 }
 
 export interface PreviewResult {
@@ -231,6 +248,9 @@ export interface DatasetRowsRequest {
   // those whose value equals the requesting user's id (value resolved server-side
   // from the JWT — only the column name travels from the client).
   authFilterColumn?: string
+  // Parameterized-query feature — JSON object string mapping each {_placeholder} in a
+  // parameterized "query"-type dataset to its value (built from the palette's filter inputs).
+  queryParameters?: string
 }
 
 export interface DatasetRowsPage {
@@ -255,6 +275,7 @@ export interface DatasetChartRequest {
   valueColumn?: string // ignored for 'count'
   aggregate: DatasetAggregate
   authFilterColumn?: string
+  queryParameters?: string
 }
 
 export interface DatasetChartPoint {
@@ -283,6 +304,7 @@ export interface DatasetExportRequest {
   sort?: DatasetSortSpec[]
   columns?: DatasetExportColumn[]
   authFilterColumn?: string
+  queryParameters?: string
 }
 
 export type DatasetExportFormat = 'csv' | 'xlsx' | 'pdf'

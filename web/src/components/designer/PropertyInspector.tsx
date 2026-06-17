@@ -1,11 +1,17 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import type { ChangeEvent, ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { MousePointerClick } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { getFieldKey, type DesignerElement } from '@/types/designer'
 import { designerApi } from '@/features/designer/designerApi'
-import { listDatasets, getDatasetColumns, getDatasetColumnsByName } from '@/features/datasets/datasetApi'
+import {
+  listDatasets,
+  getDataset,
+  getDatasetColumns,
+  getDatasetColumnsByName,
+} from '@/features/datasets/datasetApi'
+import { extractPlaceholders } from '@/features/datasets/queryParameters'
 import { useDesignerCanvasStore } from '@/store/designerCanvas'
 import { cn } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
@@ -46,6 +52,14 @@ import {
   updateCondition,
   type DatasetFilterGroup,
 } from './datasetFilter'
+import {
+  addQueryParamBinding,
+  parseQueryParamBindings,
+  removeQueryParamBinding,
+  unmappedParams,
+  updateQueryParamBinding,
+  type QueryParamBinding,
+} from './queryParamBindings'
 import { parseTableColumns, type TableColumnConfig } from './datasetTable'
 
 // Compact override for the inspector — shadcn Input defaults to h-8 / text-sm
@@ -125,15 +139,23 @@ function BoolField({
   label,
   checked,
   onChange,
+  disabled,
 }: {
   label: string
   checked: boolean
   onChange: (v: boolean) => void
+  disabled?: boolean
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+    <label
+      className={cn(
+        'flex items-center gap-2 text-xs text-muted-foreground',
+        disabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer',
+      )}
+    >
       <Checkbox
         checked={checked}
+        disabled={disabled}
         onCheckedChange={(v) => onChange(v === true)}
       />
       {label}
@@ -1372,6 +1394,108 @@ function DatasetFilterConditionsField({
   )
 }
 
+// Query parameter bindings — for a parameterized "query"-type datasource, each {_placeholder}
+// is mapped to a filter input's field key. Like the filter conditions UI but with NO operator
+// (a parameter is a value substitution, not a condition); the add button reads "Add Param".
+function DatasetParamBindingsField({
+  bindings,
+  placeholders,
+  fieldKeys,
+  onChange,
+}: {
+  bindings: QueryParamBinding[]
+  placeholders: string[]
+  fieldKeys: string[]
+  onChange: (next: QueryParamBinding[]) => void
+}) {
+  const { t } = useTranslation()
+
+  const missing = unmappedParams(bindings, placeholders)
+  const fieldKeyPlaceholder =
+    fieldKeys.length === 0
+      ? t('designer.inspector.placeholders.datasetNoFilterInputs')
+      : t('designer.inspector.placeholders.datasetSelectFieldKey')
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {t('designer.inspector.fields.queryParameters')}
+      </span>
+
+      {bindings.length === 0 && (
+        <p className="text-[10px] text-muted-foreground">
+          {t('designer.inspector.help.datasetNoParams')}
+        </p>
+      )}
+
+      {bindings.map((binding) => {
+        const paramOptions: ComboboxOption[] = [
+          ...(binding.param !== '' && !placeholders.includes(binding.param)
+            ? [{ value: binding.param, label: `${binding.param} (not in query)` }]
+            : []),
+          ...placeholders.map((ph) => ({ value: ph, label: ph })),
+        ]
+        const fkOptions: ComboboxOption[] = [
+          ...(binding.valueFieldKey !== '' && !fieldKeys.includes(binding.valueFieldKey)
+            ? [{ value: binding.valueFieldKey, label: `${binding.valueFieldKey} (no input)` }]
+            : []),
+          ...fieldKeys.map((k) => ({ value: k, label: k })),
+        ]
+        return (
+          <div key={binding.id} className="flex flex-col gap-1 rounded border border-border bg-card p-1.5">
+            <div className="flex items-center gap-1">
+              <Combobox
+                value={binding.param}
+                onValueChange={(v) => onChange(updateQueryParamBinding(bindings, binding.id, { param: v }))}
+                options={paramOptions}
+                placeholder={t('designer.inspector.placeholders.datasetSelectParam')}
+                searchPlaceholder={t('designer.inspector.placeholders.datasetSelectParam')}
+                className={TRIGGER_COMPACT_CLASS}
+                aria-label={t('designer.inspector.fields.queryParameterName')}
+              />
+              <button
+                type="button"
+                onClick={() => onChange(removeQueryParamBinding(bindings, binding.id))}
+                className="ml-auto rounded px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                aria-label={t('designer.inspector.removeParam')}
+              >
+                ✕
+              </button>
+            </div>
+            <Combobox
+              value={binding.valueFieldKey}
+              onValueChange={(v) => onChange(updateQueryParamBinding(bindings, binding.id, { valueFieldKey: v }))}
+              options={fkOptions}
+              placeholder={fieldKeyPlaceholder}
+              searchPlaceholder={t('designer.inspector.placeholders.datasetSelectFieldKey')}
+              disabled={fieldKeys.length === 0}
+              className={TRIGGER_COMPACT_CLASS}
+              aria-label={t('designer.inspector.fields.filterValueField')}
+            />
+          </div>
+        )
+      })}
+
+      {missing.length > 0 && (
+        <p className="text-[10px] text-muted-foreground">
+          {t('designer.inspector.help.datasetUnmappedParameters', { params: missing.join(', ') })}
+        </p>
+      )}
+
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-7 text-xs"
+        // Default the new row to the first still-unmapped placeholder for convenience.
+        onClick={() => onChange(addQueryParamBinding(bindings, missing[0] ?? ''))}
+      >
+        {t('designer.inspector.addParam')}
+      </Button>
+    </div>
+  )
+}
+
 // "Set columns" — a dialog listing the dataset columns; each a visibility checkbox plus a
 // header-text override. Writes the tableColumns config live as the author edits.
 function DatasetSetColumnsField({
@@ -1668,9 +1792,31 @@ function DatasetComponentFields({
   const columns = columnsQuery.data?.columns ?? []
   const columnsReady = datasetId !== ''
 
+  // Parameterized-query feature — load the dataset's query type + SQL so the inspector can
+  // detect a parameterized "query" datasource and require its placeholders be mapped.
+  const datasetDetailQuery = useQuery({
+    queryKey: ['dataset', 'detail', datasetId],
+    queryFn: () => getDataset(datasetId),
+    enabled: datasetId !== '',
+    staleTime: 60_000,
+  })
+  const placeholders = useMemo(
+    () => extractPlaceholders(datasetDetailQuery.data?.query),
+    [datasetDetailQuery.data?.query],
+  )
+  const isParameterized =
+    datasetDetailQuery.data?.queryType === 'query' && placeholders.length > 0
+
   const fieldKeys = collectDescendantFieldKeys(element.children)
   const filterGroup = parseDatasetFilter(p.filterConditions)
+  const paramBindings = parseQueryParamBindings(p.queryParamBindings)
   const tableColumns = parseTableColumns(p.tableColumns)
+
+  // Placeholders not yet bound to a filter input. Until this is empty the parameterized
+  // datasource isn't fully wired (the designer save is blocked too — see designer page).
+  const unmappedPlaceholders = isParameterized
+    ? unmappedParams(paramBindings, placeholders)
+    : []
 
   const datasetsDisabled = datasetsQuery.isLoading || datasetsQuery.isError
   const datasetPlaceholder = datasetsQuery.isLoading
@@ -1741,6 +1887,30 @@ function DatasetComponentFields({
           {t('designer.inspector.help.authFilterColumn')}
         </span>
       </Field>
+
+      {/* Query parameters — a parameterized "query" datasource binds each {_placeholder}
+          to a filter input. Separate from the filter conditions below (which add extra
+          WHERE filters on the dataset's output columns). */}
+      {isParameterized && (
+        <>
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-300">
+            {t('designer.inspector.help.datasetParameterized')}
+            {unmappedPlaceholders.length > 0 && (
+              <span className="mt-1 block font-medium text-destructive">
+                {t('designer.inspector.help.datasetUnmappedParameters', {
+                  params: unmappedPlaceholders.join(', '),
+                })}
+              </span>
+            )}
+          </div>
+          <DatasetParamBindingsField
+            bindings={paramBindings}
+            placeholders={placeholders}
+            fieldKeys={fieldKeys}
+            onChange={(next) => updateProp(id, 'queryParamBindings', next)}
+          />
+        </>
+      )}
 
       <BoolField
         label={t('designer.inspector.fields.filterable')}

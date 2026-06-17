@@ -40,12 +40,15 @@ import {
   downloadDatasetExport,
   fetchDatasetChart,
   fetchDatasetRows,
+  getDataset,
   type DatasetAggregate,
   type DatasetExportFormat,
   type DatasetSortSpec,
 } from '@/features/datasets/datasetApi'
+import { extractPlaceholders } from '@/features/datasets/queryParameters'
 import ElementRenderer, { type InteractiveFormProps } from './ElementRenderer'
 import { parseDatasetFilter, resolveDatasetFilter } from './datasetFilter'
+import { parseQueryParamBindings, resolveQueryParameters } from './queryParamBindings'
 import { parseTableColumns, resolveVisibleColumns } from './datasetTable'
 
 const PAGE_SIZE = 25
@@ -106,6 +109,24 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
   const filterGroup = useMemo(() => parseDatasetFilter(p.filterConditions), [p.filterConditions])
   const tableColumns = useMemo(() => parseTableColumns(p.tableColumns), [p.tableColumns])
 
+  // Parameterized-query feature — a "query"-type dataset whose SQL has {_placeholder} tokens
+  // requires every placeholder filled (via the filter inputs) before any row/chart can run.
+  const detailQuery = useQuery({
+    queryKey: ['dataset', 'detail', datasetId],
+    queryFn: () => getDataset(datasetId),
+    enabled: datasetId !== '',
+    staleTime: 60_000,
+  })
+  const placeholders = useMemo(
+    () => extractPlaceholders(detailQuery.data?.query),
+    [detailQuery.data?.query],
+  )
+  const isParameterized = detailQuery.data?.queryType === 'query' && placeholders.length > 0
+  const paramBindings = useMemo(
+    () => parseQueryParamBindings(p.queryParamBindings),
+    [p.queryParamBindings],
+  )
+
   // Chart config (shared across all enabled chart types).
   const chartCategory = typeof p.chartCategory === 'string' ? p.chartCategory : ''
   const chartValue = typeof p.chartValue === 'string' ? p.chartValue : ''
@@ -133,9 +154,17 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
   // The filter actually in effect (set on Apply / Clear). Kept separate from the live
   // form values so typing in the form doesn't refetch on every keystroke.
   const [appliedFilter, setAppliedFilter] = useState<unknown>(null)
+  // Resolved {_placeholder} values for a parameterized dataset (JSON object string), set on
+  // Apply alongside appliedFilter. Undefined until the user supplies them.
+  const [appliedParams, setAppliedParams] = useState<string | undefined>(undefined)
   const [sort, setSort] = useState<DatasetSortSpec[]>([])
   const [page, setPage] = useState(1)
   const [exporting, setExporting] = useState(false)
+
+  // A parameterized dataset is implicitly filterable (its placeholders bind to filter
+  // inputs), and its filter panel stays open so the user can supply those values.
+  const effectiveFilterable = filterable || isParameterized
+  const showFilterPanel = effectiveFilterable && (filterOpen || isParameterized)
 
   const filterInteractive = useMemo<InteractiveFormProps>(
     () => ({
@@ -150,7 +179,7 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
   )
 
   const rowsQuery = useQuery({
-    queryKey: ['dataset-rows', datasetId, appliedFilter, sort, page, authFilterColumn],
+    queryKey: ['dataset-rows', datasetId, appliedFilter, appliedParams, sort, page, authFilterColumn],
     queryFn: () =>
       fetchDatasetRows(datasetId, {
         filters: appliedFilter ?? undefined,
@@ -158,8 +187,14 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
         page,
         pageSize: PAGE_SIZE,
         authFilterColumn: authFilterColumn || undefined,
+        queryParameters: appliedParams,
       }),
-    enabled: datasetId !== '' && activeView === 'table',
+    // A parameterized dataset waits for its placeholder values before the first fetch
+    // (otherwise the server returns 422 for the missing parameters).
+    enabled:
+      datasetId !== '' &&
+      activeView === 'table' &&
+      (!isParameterized || appliedParams !== undefined),
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   })
@@ -171,12 +206,16 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
   )
 
   function applyFilter() {
+    // Filter conditions filter the dataset's output columns; the query parameters bind the
+    // {_placeholder} values — resolved separately from their own bindings.
     setAppliedFilter(resolveDatasetFilter(filterGroup, filterValues))
+    setAppliedParams(resolveQueryParameters(paramBindings, placeholders, filterValues))
     setPage(1)
   }
   function clearFilter() {
     setFilterValues({})
     setAppliedFilter(null)
+    setAppliedParams(undefined)
     setPage(1)
   }
 
@@ -199,6 +238,7 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
         sort,
         columns: visibleColumns.map((c) => ({ column: c.column, header: c.header })),
         authFilterColumn: authFilterColumn || undefined,
+        queryParameters: appliedParams,
       })
     } catch {
       toast.error(t('dataset.exportFailed'))
@@ -241,7 +281,7 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
           ))}
         </div>
         <div className="ml-auto flex items-center gap-1">
-          {filterable && (
+          {effectiveFilterable && (
             <>
               <Button
                 type="button"
@@ -285,7 +325,7 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
       </div>
 
       {/* Filter form */}
-      {filterable && filterOpen && (
+      {showFilterPanel && (
         <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/40 p-3">
           {(element.children ?? []).map((child) => (
             <ElementRenderer
@@ -389,6 +429,8 @@ export default function DatasetView({ element }: { element: DesignerElement }) {
           aggregate={chartAggregate}
           filters={appliedFilter}
           authFilterColumn={authFilterColumn}
+          queryParameters={appliedParams}
+          paramsReady={!isParameterized || appliedParams !== undefined}
         />
       )}
     </div>
@@ -406,6 +448,8 @@ function ChartBody({
   aggregate,
   filters,
   authFilterColumn,
+  queryParameters,
+  paramsReady,
 }: {
   datasetId: string
   chartType: Exclude<ViewKey, 'table'>
@@ -414,12 +458,14 @@ function ChartBody({
   aggregate: DatasetAggregate
   filters: unknown
   authFilterColumn: string
+  queryParameters: string | undefined
+  paramsReady: boolean
 }) {
   const { t } = useTranslation()
   const needsValue = aggregate !== 'count'
 
   const query = useQuery({
-    queryKey: ['dataset-chart', datasetId, category, value, aggregate, filters, authFilterColumn],
+    queryKey: ['dataset-chart', datasetId, category, value, aggregate, filters, authFilterColumn, queryParameters],
     queryFn: () =>
       fetchDatasetChart(datasetId, {
         filters: filters ?? undefined,
@@ -427,8 +473,9 @@ function ChartBody({
         valueColumn: needsValue ? value : undefined,
         aggregate,
         authFilterColumn: authFilterColumn || undefined,
+        queryParameters,
       }),
-    enabled: datasetId !== '' && category !== '' && (!needsValue || value !== ''),
+    enabled: datasetId !== '' && category !== '' && (!needsValue || value !== '') && paramsReady,
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   })

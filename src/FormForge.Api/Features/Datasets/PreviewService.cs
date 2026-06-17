@@ -16,12 +16,16 @@ internal interface IPreviewService
     Task<PreviewServiceResult> ExecuteAsync(PreviewRequest request, CancellationToken ct = default);
 }
 
-internal enum PreviewOutcome { Success, Timeout, SqlError, BuilderStateInvalid }
+// MissingParameters — a parameterized "query"-type preview was requested but one or more
+// {_placeholder} tokens had no value in queryParameters. The endpoint maps it to 422 and
+// echoes the missing names so the client can prompt for them.
+internal enum PreviewOutcome { Success, Timeout, SqlError, BuilderStateInvalid, MissingParameters }
 
 internal sealed record PreviewServiceResult(
     PreviewOutcome Outcome,
     PreviewResultDto? Data = null,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null,
+    IReadOnlyList<string>? MissingParameters = null);
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812",
     Justification = "Registered via DI.")]
@@ -44,6 +48,12 @@ internal sealed class PreviewService(
         // Step 1: Resolve SQL + parameters
         string sql;
         IReadOnlyList<object?> parameters = [];
+        // Parameterized {_placeholder} values are bound as PostgreSQL `unknown`-typed
+        // parameters so they coerce contextually exactly like an inline literal would
+        // ('uuid'::unknown → uuid, '23'::unknown → integer). A plain text parameter would
+        // NOT coerce (uuid = text has no operator), changing the user's intended semantics.
+        // The builder-mode path keeps its already-typed positional binding (false here).
+        var bindParametersAsUnknown = false;
 
         if (request.IsCustomQuery)
         {
@@ -51,11 +61,41 @@ internal sealed class PreviewService(
             // would produce `SELECT * FROM (SELECT 1;) AS _preview LIMIT 10` which is a
             // Postgres parse error. Strip first so SqlSelectEnforcer sees the clean query.
             var query = (request.Query ?? string.Empty).TrimEnd().TrimEnd(';').TrimEnd();
-            var validation = SqlSelectEnforcer.Validate(query);
-            if (!validation.IsValid)
-                return new PreviewServiceResult(PreviewOutcome.SqlError,
-                    ErrorMessage: validation.ErrorMessage);
-            sql = query;
+
+            if (DatasetParameterResolver.HasPlaceholders(query))
+            {
+                // Parameterized "query"-type dataset — bind {_placeholder} tokens as positional
+                // parameters before validating/executing, so values are never interpolated into
+                // the SQL text. The substituted SQL (with $N) still parses as a SelectStmt, so
+                // SELECT-only enforcement runs unchanged on the rewritten query.
+                if (!DatasetParameterResolver.TryParseParameters(
+                        request.QueryParameters, out var values, out var parseError))
+                    return new PreviewServiceResult(PreviewOutcome.SqlError, ErrorMessage: parseError);
+
+                var resolution = DatasetParameterResolver.Resolve(query, values);
+                if (resolution.MissingParameters.Count > 0)
+                    return new PreviewServiceResult(PreviewOutcome.MissingParameters,
+                        ErrorMessage: "Missing values for parameter(s): "
+                            + string.Join(", ", resolution.MissingParameters),
+                        MissingParameters: resolution.MissingParameters);
+
+                var validation = SqlSelectEnforcer.Validate(resolution.Sql);
+                if (!validation.IsValid)
+                    return new PreviewServiceResult(PreviewOutcome.SqlError,
+                        ErrorMessage: validation.ErrorMessage);
+
+                sql = resolution.Sql;
+                parameters = resolution.Parameters;
+                bindParametersAsUnknown = true;
+            }
+            else
+            {
+                var validation = SqlSelectEnforcer.Validate(query);
+                if (!validation.IsValid)
+                    return new PreviewServiceResult(PreviewOutcome.SqlError,
+                        ErrorMessage: validation.ErrorMessage);
+                sql = query;
+            }
         }
         else
         {
@@ -85,6 +125,13 @@ internal sealed class PreviewService(
         // Clamp timeout to a positive integer; fall back to 5 on misconfigured or zero values.
         var rawTimeout = configuration["DatasetManager:PreviewTimeoutSeconds"];
         var timeoutSeconds = int.TryParse(rawTimeout, out var ts) && ts > 0 ? rawTimeout! : "5";
+
+        // Optional extra WHERE clause (parameterized-query feature). Preview is dataset-
+        // management-only — a caller who can reach it can already author the entire SELECT —
+        // so applying the condition as a raw predicate adds no privilege beyond what they have.
+        // At true runtime the condition is built server-side from filters, never taken raw.
+        var condition = request.Condition?.Trim();
+        var whereClause = string.IsNullOrEmpty(condition) ? string.Empty : $" WHERE {condition}";
         try
         {
             var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
@@ -105,10 +152,30 @@ internal sealed class PreviewService(
                     using (var previewCmd = conn.CreateCommand())
                     {
                         previewCmd.Transaction = tx;
-                        previewCmd.CommandText = $"SELECT * FROM ({sql}) AS _preview LIMIT 10";
+                        previewCmd.CommandText =
+                            $"SELECT * FROM ({sql}) AS _preview{whereClause} LIMIT 10";
 
                         for (int i = 0; i < parameters.Count; i++)
-                            previewCmd.Parameters.AddWithValue(parameters[i] ?? DBNull.Value);
+                        {
+                            if (bindParametersAsUnknown)
+                            {
+                                // `unknown`-typed param: value is the literal's string form so
+                                // PostgreSQL coerces it to the comparison column's type.
+                                var raw = parameters[i];
+                                previewCmd.Parameters.Add(new NpgsqlParameter
+                                {
+                                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Unknown,
+                                    Value = raw is null
+                                        ? DBNull.Value
+                                        : System.Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture)
+                                          ?? (object)DBNull.Value,
+                                });
+                            }
+                            else
+                            {
+                                previewCmd.Parameters.AddWithValue(parameters[i] ?? DBNull.Value);
+                            }
+                        }
 
                         using var reader = await previewCmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
 

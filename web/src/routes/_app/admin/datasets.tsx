@@ -22,13 +22,23 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { SqlQueryTextarea } from '../../../features/datasets/SqlQueryTextarea'
 import { PreviewResultDialog } from '../../../features/datasets/PreviewResultDialog'
+import { ParameterInputDialog } from '../../../features/datasets/ParameterInputDialog'
+import { extractPlaceholders } from '../../../features/datasets/queryParameters'
 import { datasetNameSchema } from '../../../features/datasets/validation'
 import {
   getDataset,
   previewDataset,
   type DatasetDetail,
+  type DatasetQueryType,
   type DatasetSummary,
   type PreviewResult,
 } from '../../../features/datasets/datasetApi'
@@ -438,6 +448,7 @@ function ModeBadge({ isCustomQuery }: { isCustomQuery: boolean }) {
 const createDatasetFormSchema = z.object({
   datasetName: datasetNameSchema,
   isCustomQuery: z.boolean(),
+  queryType: z.enum(['view', 'query']),
   query: z.string(),
 })
 type CreateDatasetFormValues = z.infer<typeof createDatasetFormSchema>
@@ -460,15 +471,18 @@ function CreateDatasetForm({ onDone }: CreateDatasetFormProps) {
   } = useForm<CreateDatasetFormValues>({
     resolver: zodResolver(createDatasetFormSchema),
     mode: 'onChange',
-    defaultValues: { isCustomQuery: true, query: '' },
+    defaultValues: { isCustomQuery: true, queryType: 'view', query: '' },
   })
 
   const isCustomQuery = watch('isCustomQuery')
+  const queryType = watch('queryType')
   const query = watch('query')
 
   const onSubmit = async (values: CreateDatasetFormValues) => {
-    // Zod's string().default('') does not block empty strings — guard manually.
-    if (values.isCustomQuery && !values.query.trim()) {
+    // Zod's string().default('') does not block empty strings — guard manually. A
+    // "query"-type dataset is always custom SQL, so it requires a non-empty query too.
+    const requiresQuery = values.isCustomQuery || values.queryType === 'query'
+    if (requiresQuery && !values.query.trim()) {
       setError('query', { message: t('datasets.sqlTextarea.emptyHint') })
       return
     }
@@ -476,7 +490,8 @@ function CreateDatasetForm({ onDone }: CreateDatasetFormProps) {
       await createMutation.mutateAsync({
         datasetName: values.datasetName,
         isCustomQuery: values.isCustomQuery,
-        query: values.isCustomQuery ? values.query.trim() : null,
+        query: requiresQuery ? values.query.trim() : null,
+        queryType: values.queryType,
       })
       reset()
       onDone()
@@ -505,8 +520,14 @@ function CreateDatasetForm({ onDone }: CreateDatasetFormProps) {
 
       <ModeToggleAndQuery
         isCustomQuery={isCustomQuery}
+        queryType={queryType}
         query={query}
         queryError={errors.query?.message}
+        onQueryTypeChange={(qt) => {
+          setValue('queryType', qt)
+          // A "query"-type dataset is custom SQL only (no visual builder / VIEW).
+          if (qt === 'query') setValue('isCustomQuery', true)
+        }}
         onModeChange={(custom) => setValue('isCustomQuery', custom)}
         onQueryChange={(v) => setValue('query', v, { shouldValidate: true })}
       />
@@ -519,6 +540,7 @@ function CreateDatasetForm({ onDone }: CreateDatasetFormProps) {
 const editDatasetFormSchema = z.object({
   datasetName: datasetNameSchema,
   isCustomQuery: z.boolean(),
+  queryType: z.enum(['view', 'query']),
   query: z.string(),
 })
 type EditDatasetFormValues = z.infer<typeof editDatasetFormSchema>
@@ -544,15 +566,18 @@ function EditDatasetForm({ dataset, onDone }: EditDatasetFormProps) {
     defaultValues: {
       datasetName: dataset.datasetName,
       isCustomQuery: dataset.isCustomQuery,
+      queryType: dataset.queryType,
       query: dataset.query ?? '',
     },
   })
 
   const isCustomQuery = watch('isCustomQuery')
+  const queryType = watch('queryType')
   const query = watch('query')
 
   const onSubmit = async (values: EditDatasetFormValues) => {
-    if (values.isCustomQuery && !values.query.trim()) {
+    const requiresQuery = values.isCustomQuery || values.queryType === 'query'
+    if (requiresQuery && !values.query.trim()) {
       setError('query', { message: t('datasets.sqlTextarea.emptyHint') })
       return
     }
@@ -560,7 +585,8 @@ function EditDatasetForm({ dataset, onDone }: EditDatasetFormProps) {
       await updateMutation.mutateAsync({
         datasetName: values.datasetName !== dataset.datasetName ? values.datasetName : undefined,
         isCustomQuery: values.isCustomQuery,
-        query: values.isCustomQuery ? values.query.trim() || null : null,
+        query: requiresQuery ? values.query.trim() || null : null,
+        queryType: values.queryType,
         version: dataset.version, // REQUIRED — optimistic concurrency token
       })
       onDone(values.datasetName)
@@ -597,8 +623,13 @@ function EditDatasetForm({ dataset, onDone }: EditDatasetFormProps) {
 
       <ModeToggleAndQuery
         isCustomQuery={isCustomQuery}
+        queryType={queryType}
         query={query}
         queryError={errors.query?.message}
+        onQueryTypeChange={(qt) => {
+          setValue('queryType', qt)
+          if (qt === 'query') setValue('isCustomQuery', true)
+        }}
         onModeChange={(custom) => setValue('isCustomQuery', custom)}
         onQueryChange={(v) => setValue('query', v, { shouldValidate: true })}
         datasetId={dataset.id}
@@ -660,19 +691,23 @@ function DatasetFormShell({
 
 interface ModeToggleAndQueryProps {
   isCustomQuery: boolean
+  queryType: DatasetQueryType
   query: string
   queryError?: string
   // Present only in the edit form: the visual Query Builder lives on the dataset's
   // own page (/admin/datasets/$id), so we can only link there once the dataset exists.
   datasetId?: string
+  onQueryTypeChange: (queryType: DatasetQueryType) => void
   onModeChange: (custom: boolean) => void
   onQueryChange: (value: string) => void
 }
 
 function ModeToggleAndQuery({
   isCustomQuery,
+  queryType,
   query,
   queryError,
+  onQueryTypeChange,
   onModeChange,
   onQueryChange,
   datasetId,
@@ -684,9 +719,14 @@ function ModeToggleAndQuery({
   const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewOpen, setPreviewOpen] = useState(false)
+  // Parameterized-query feature — placeholders in the SQL must be filled before preview.
+  const [paramDialogOpen, setParamDialogOpen] = useState(false)
+  const placeholders = extractPlaceholders(query)
+  const isQueryType = queryType === 'query'
 
   const previewMutation = useMutation({
-    mutationFn: () => previewDataset({ isCustomQuery: true, query }),
+    mutationFn: (queryParameters?: string) =>
+      previewDataset({ isCustomQuery: true, query, queryType, queryParameters }),
     onSuccess: (data) => {
       setPreviewResult(data)
       setPreviewError(null)
@@ -701,6 +741,17 @@ function ModeToggleAndQuery({
     },
   })
 
+  // On Preview: if the query has {_placeholder} tokens, prompt for their values first,
+  // then run the preview with the resolved queryParameters. Otherwise preview directly.
+  const handlePreview = () => {
+    if (placeholders.length > 0) {
+      setParamDialogOpen(true)
+      return
+    }
+    setPreviewOpen(true)
+    previewMutation.mutate(undefined)
+  }
+
   // Clear stale preview output whenever the query text changes (Task 8). Switching to
   // Query Builder mode unmounts this branch entirely, which resets the state too.
   useEffect(() => {
@@ -710,6 +761,24 @@ function ModeToggleAndQuery({
 
   return (
     <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label>{t('admin.datasets.fieldQueryType')}</Label>
+        <Select value={queryType} onValueChange={(v) => onQueryTypeChange(v as DatasetQueryType)}>
+          <SelectTrigger className="w-48">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="view">{t('admin.datasets.queryTypeView')}</SelectItem>
+            <SelectItem value="query">{t('admin.datasets.queryTypeQuery')}</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          {isQueryType
+            ? t('admin.datasets.queryTypeQueryHint')
+            : t('admin.datasets.queryTypeViewHint')}
+        </p>
+      </div>
+
       <div className="space-y-1.5">
         <Label>{t('admin.datasets.fieldMode')}</Label>
         <div className="flex gap-2">
@@ -725,6 +794,8 @@ function ModeToggleAndQuery({
             type="button"
             size="sm"
             variant={!isCustomQuery ? 'default' : 'outline'}
+            // A "query"-type dataset never creates a VIEW, so the visual builder is disabled.
+            disabled={isQueryType}
             onClick={() => onModeChange(false)}
           >
             {t('admin.datasets.modeQueryBuilder')}
@@ -743,16 +814,24 @@ function ModeToggleAndQuery({
               variant="outline"
               size="sm"
               disabled={!query.trim() || previewMutation.isPending}
-              onClick={() => {
-                setPreviewOpen(true)
-                previewMutation.mutate()
-              }}
+              onClick={handlePreview}
             >
               {previewMutation.isPending
                 ? t('datasets.previewingButton')
                 : t('datasets.previewButton')}
             </Button>
           </div>
+
+          <ParameterInputDialog
+            open={paramDialogOpen}
+            onOpenChange={setParamDialogOpen}
+            placeholders={placeholders}
+            onSubmit={(queryParameters) => {
+              setParamDialogOpen(false)
+              setPreviewOpen(true)
+              previewMutation.mutate(queryParameters)
+            }}
+          />
 
           <PreviewResultDialog
             open={previewOpen}

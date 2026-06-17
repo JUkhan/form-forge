@@ -921,7 +921,9 @@
     "toolbar": {
       "structuralHeader": "Containers",
       "leafHeader": "Fields",
-      "structuralHint": "Layout containers — drag onto the canvas to start a section."
+      "structuralHint": "Layout containers — drag onto the canvas to start a section.",
+      "searchPlaceholder": "Search elements…",
+      "noResults": "No elements match “{{query}}”."
     },
     "canvas": {
       "title": "Designer",

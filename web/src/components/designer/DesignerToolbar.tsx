@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   AlignLeft,
@@ -23,6 +23,7 @@ import {
   Variable,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Command, CommandInput } from '@/components/ui/command'
 import { DRAG_MIME, type DragData } from './dnd'
 import type { UseKeyboardDnDReturn } from './useKeyboardDnD'
 
@@ -160,6 +161,33 @@ interface DesignerToolbarProps {
 
 export default function DesignerToolbar({ className, kbdDnD }: DesignerToolbarProps) {
   const { t } = useTranslation()
+  const [query, setQuery] = useState('')
+
+  // Case-insensitive substring match across the user-visible label, the
+  // description, and the internal palette type (so searching "datetime" or
+  // "html" hits regardless of which field carries the term). Manual filtering
+  // — rather than cmdk's CommandItem registry — keeps each PaletteCard's
+  // keyboard DnD (Space/Enter pickup, focus management) fully intact; cmdk's
+  // arrow/Enter list navigation would otherwise contend with it.
+  const filter = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return <T extends { label: string; description: string; type: string }>(
+      items: ReadonlyArray<T>,
+    ) =>
+      q === ''
+        ? items
+        : items.filter(
+            (el) =>
+              el.label.toLowerCase().includes(q) ||
+              el.description.toLowerCase().includes(q) ||
+              el.type.toLowerCase().includes(q),
+          )
+  }, [query])
+
+  const structural = filter(STRUCTURAL_ELEMENTS)
+  const leaf = filter(LEAF_ELEMENTS)
+  const hasResults = structural.length > 0 || leaf.length > 0
+
   return (
     <aside
       className={cn(
@@ -167,34 +195,69 @@ export default function DesignerToolbar({ className, kbdDnD }: DesignerToolbarPr
         className,
       )}
     >
-      <div className="flex flex-1 flex-col overflow-y-auto">
-        <ToolbarSectionHeader>{t('designer.toolbar.structuralHeader')}</ToolbarSectionHeader>
-        <div className="flex flex-col gap-2 p-3">
-          {STRUCTURAL_ELEMENTS.map((el) => (
-            <PaletteCard
-              key={el.type}
-              type={el.type}
-              label={el.label}
-              description={el.description}
-              Icon={el.icon}
-              kbdDnD={kbdDnD}
-            />
-          ))}
+      {/* Command provides the styled search shell. shouldFilter is off because
+          we filter the lists ourselves and render no CommandItems — the cards
+          own their drag/keyboard behaviour. */}
+      <Command
+        shouldFilter={false}
+        className="flex flex-1 flex-col overflow-hidden rounded-none bg-transparent"
+      >
+        <div className="shrink-0 p-3 pb-0">
+          <CommandInput
+            value={query}
+            onValueChange={setQuery}
+            placeholder={t('designer.toolbar.searchPlaceholder')}
+          />
         </div>
-        <ToolbarSectionHeader>{t('designer.toolbar.leafHeader')}</ToolbarSectionHeader>
-        <div className="flex flex-col gap-2 p-3">
-          {LEAF_ELEMENTS.map((el) => (
-            <PaletteCard
-              key={el.type}
-              type={el.type}
-              label={el.label}
-              description={el.description}
-              Icon={el.icon}
-              kbdDnD={kbdDnD}
-            />
-          ))}
+        <div className="flex flex-1 flex-col overflow-y-auto">
+          {!hasResults ? (
+            <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+              {t('designer.toolbar.noResults', { query: query.trim() })}
+            </p>
+          ) : (
+            <>
+              {structural.length > 0 && (
+                <>
+                  <ToolbarSectionHeader>
+                    {t('designer.toolbar.structuralHeader')}
+                  </ToolbarSectionHeader>
+                  <div className="flex flex-col gap-2 p-3">
+                    {structural.map((el) => (
+                      <PaletteCard
+                        key={el.type}
+                        type={el.type}
+                        label={el.label}
+                        description={el.description}
+                        Icon={el.icon}
+                        kbdDnD={kbdDnD}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+              {leaf.length > 0 && (
+                <>
+                  <ToolbarSectionHeader>
+                    {t('designer.toolbar.leafHeader')}
+                  </ToolbarSectionHeader>
+                  <div className="flex flex-col gap-2 p-3">
+                    {leaf.map((el) => (
+                      <PaletteCard
+                        key={el.type}
+                        type={el.type}
+                        label={el.label}
+                        description={el.description}
+                        Icon={el.icon}
+                        kbdDnD={kbdDnD}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </div>
-      </div>
+      </Command>
     </aside>
   )
 }

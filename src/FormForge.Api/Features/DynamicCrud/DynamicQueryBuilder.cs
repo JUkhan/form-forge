@@ -464,6 +464,44 @@ internal static class DynamicQueryBuilder
         return (sql, parameters);
     }
 
+    // TreeView ancestor reveal — given a set of (selected) node ids, returns the ids of
+    // ALL their ancestors by walking UP the self-FK, EXCLUDING the seed ids themselves.
+    // Lets the UI mark collapsed ancestors that contain a selection (and auto-expand the
+    // path to one). fkColumnName is produced by BuildFkColumnName.
+    internal static (string Sql, DynamicParameters Parameters) BuildTreeAncestorIdsQuery(
+        SafeIdentifier tableName,
+        string fkColumnName,
+        IReadOnlyList<Guid> selectedIds,
+        // Auth filter: when both set, only the user's own ancestors are walked.
+        string? ownerColumn = null,
+        Guid? ownerId = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentException.ThrowIfNullOrEmpty(fkColumnName);
+        ArgumentNullException.ThrowIfNull(selectedIds);
+
+        var t = tableName.Value;
+        var scoped = !string.IsNullOrEmpty(ownerColumn) && ownerId.HasValue;
+        var anchorOwner = scoped ? $" AND \"{ownerColumn}\" = @p_owner_id" : string.Empty;
+        var recurseOwner = scoped ? $" AND p.\"{ownerColumn}\" = @p_owner_id" : string.Empty;
+        var sql = string.Create(CultureInfo.InvariantCulture, $"""
+            WITH RECURSIVE ancestors AS (
+                SELECT "id", "{fkColumnName}" AS parent_id FROM "{t}"
+                  WHERE "id" = ANY(@p_ids) AND "is_deleted" = false{anchorOwner}
+                UNION
+                SELECT p."id", p."{fkColumnName}" AS parent_id FROM "{t}" p
+                  JOIN ancestors a ON p."id" = a.parent_id
+                WHERE p."is_deleted" = false{recurseOwner}
+            )
+            SELECT "id" FROM ancestors WHERE NOT ("id" = ANY(@p_ids))
+            """);
+
+        var parameters = new DynamicParameters();
+        parameters.Add("p_ids", selectedIds.ToArray());
+        if (scoped) parameters.Add("p_owner_id", ownerId!.Value);
+        return (sql, parameters);
+    }
+
     // Appends an OR of substring (ILIKE) predicates across every user column (cast to
     // text so numeric/temporal/uuid columns are searchable too), joined with AND onto the
     // existing WHERE. No-op when search is blank or the node template has no user columns.

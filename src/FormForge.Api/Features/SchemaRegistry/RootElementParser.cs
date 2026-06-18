@@ -156,7 +156,7 @@ internal static class RootElementParser
         }
 
         // A TreeView renders a standalone self-referencing tree of ANOTHER designer's
-        // table (its node template, rowDesignerId). It contributes ONE TEXT column to
+        // table (its node template, rowDesignerId). It contributes ONE column to
         // THIS designer's table — its fieldKey, which holds the view/select-mode
         // selection (comma-separated node ids), like a multi-select. Its node-template
         // children belong to the referenced table, so do NOT recurse into them (any
@@ -174,9 +174,24 @@ internal static class RootElementParser
                     && SafeIdentifier.TryCreate(tvFieldKey, out _, out _)
                     && seenKeys.Add(tvFieldKey))
                 {
+                    // The component-type default is TEXT, but an explicit per-field
+                    // "pgType" property (authored via the Designer's PgType component)
+                    // takes precedence — e.g. a single-select tree keyed by uuid stores
+                    // a uuid, not free text. Validate + canonicalize through SafePgType so
+                    // only an allowlisted, DDL-safe type string reaches ColumnDefinition;
+                    // absent or malformed values fall back to the TEXT default (mirrors
+                    // the normal column-extraction path below).
+                    var tvPgType = ComponentTypeMapper.MapToPgType(type) ?? "TEXT";
+                    if (tvProps.TryGetProperty("pgType", out var tvPgTypeProp) &&
+                        tvPgTypeProp.ValueKind == JsonValueKind.String &&
+                        SafePgType.TryCreate(tvPgTypeProp.GetString(), out var tvSafePgType, out _))
+                    {
+                        tvPgType = tvSafePgType!.Value;
+                    }
+
                     columns.Add(new ColumnDefinition(
                         ColumnName: tvFieldKey,
-                        PgType: "TEXT",
+                        PgType: tvPgType,
                         ComponentType: type,
                         IsImage: false));
                 }

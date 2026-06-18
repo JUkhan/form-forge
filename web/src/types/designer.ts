@@ -65,6 +65,9 @@ export interface DesignerElementProperties {
   // its entire subtree: checking a node selects all of its descendants too.
   viewMode?: boolean
   selectAll?: boolean
+  // Presentation only: render the tree inside a compact dropdown (a trigger button that
+  // opens a popover holding the tree) so it fits a tight space. Behaviour is unchanged.
+  isDropdownUi?: boolean
   // Optional per-component auth filter: the node-template column that owns each record
   // per user. Stamped with the current user on create (server-side) and the field is
   // hidden on the form; reads/edits/deletes are scoped so each user only sees their own.

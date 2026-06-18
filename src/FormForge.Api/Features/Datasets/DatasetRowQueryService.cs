@@ -91,6 +91,11 @@ internal sealed record DatasetTreeDescendantsResult(
     IReadOnlyList<string>? Ids = null,
     string? ErrorDetail = null);
 
+internal sealed record DatasetTreeAncestorsResult(
+    DatasetRowsOutcome Outcome,
+    IReadOnlyList<string>? Ids = null,
+    string? ErrorDetail = null);
+
 internal interface IDatasetRowQueryService
 {
     // authUserId (optional) is the requesting user's id; combined with the request's
@@ -113,6 +118,12 @@ internal interface IDatasetRowQueryService
     // The key-column values of every descendant of ParentId (recursive), for cascade select.
     Task<DatasetTreeDescendantsResult> GetTreeDescendantsAsync(
         Guid datasetId, string keyColumn, string parentColumn, string parentId,
+        string? authFilterColumn, CancellationToken ct, Guid? authUserId = null);
+
+    // The key-column values of every ancestor of the given node ids (recursive, walks up),
+    // for revealing/marking the path to a selection seeded when editing a record.
+    Task<DatasetTreeAncestorsResult> GetTreeAncestorsAsync(
+        Guid datasetId, string keyColumn, string parentColumn, IReadOnlyList<string> ids,
         string? authFilterColumn, CancellationToken ct, Guid? authUserId = null);
 }
 
@@ -513,6 +524,88 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
                 .Where(s => s.Length > 0)
                 .ToList();
             return new DatasetTreeDescendantsResult(DatasetRowsOutcome.Success, ids);
+        }
+        finally
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    public async Task<DatasetTreeAncestorsResult> GetTreeAncestorsAsync(
+        Guid datasetId, string keyColumn, string parentColumn, IReadOnlyList<string> ids,
+        string? authFilterColumn, CancellationToken ct, Guid? authUserId = null)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        if (ids.Count == 0)
+            return new DatasetTreeAncestorsResult(DatasetRowsOutcome.Success, Array.Empty<string>());
+
+        var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // Mirrors GetTreeDescendantsAsync: a parameterized dataset is unsupported for tree
+            // reveal (no runtime placeholders), placeholder-free query + view types work.
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, queryParametersJson: null, allowParameterized: true,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            if (resolved.Outcome == DatasetSourceOutcome.NotFound)
+                return new DatasetTreeAncestorsResult(DatasetRowsOutcome.NotFound);
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
+                return new DatasetTreeAncestorsResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: resolved.Error);
+            var src = resolved.Source!;
+            var columnTypes = src.ColumnTypes;
+            if (!columnTypes.ContainsKey(keyColumn))
+                return new DatasetTreeAncestorsResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown key column '{keyColumn}'.");
+            if (!columnTypes.ContainsKey(parentColumn))
+                return new DatasetTreeAncestorsResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown parent column '{parentColumn}'.");
+
+            var authFilter = ResolveAuthFilter(authFilterColumn, authUserId);
+            if (authFilter is { } afc && !columnTypes.ContainsKey(afc.Column))
+                return new DatasetTreeAncestorsResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown auth filter column '{afc.Column}'.");
+
+            var viewRef = src.Relation;
+            var kc = QuoteIdentifier(keyColumn);
+            var pc = QuoteIdentifier(parentColumn);
+
+            var parameters = new DynamicParameters();
+            // Compare on ::text so the seed-id array works regardless of the key column type
+            // (uuid / int / text). Ids round-trip to/from the client as strings already.
+            parameters.Add("p_ids", ids.ToArray());
+
+            var authAnchor = string.Empty;
+            var authRec = string.Empty;
+            if (authFilter is { } af)
+            {
+                object authVal = columnTypes.TryGetValue(af.Column, out var at) && at == "uuid"
+                    ? af.Value
+                    : af.Value.ToString();
+                parameters.Add("p_auth", authVal);
+                var ac = QuoteIdentifier(af.Column);
+                authAnchor = $" AND {ac} = @p_auth";
+                authRec = $" AND c.{ac} = @p_auth";
+            }
+
+            // Anchor on the seed nodes, then recurse to each row whose key matches a
+            // collected parent. UNION dedups shared ancestors / non-strict trees.
+            var sql =
+                "WITH RECURSIVE " +
+                (src.CteDefinition.Length > 0 ? src.CteDefinition + ", " : string.Empty) +
+                "a AS (" +
+                $"SELECT {kc} AS k, {pc} AS p FROM {viewRef} WHERE {kc}::text = ANY(@p_ids){authAnchor} " +
+                $"UNION SELECT c.{kc}, c.{pc} FROM {viewRef} c JOIN a ON c.{kc} = a.p{authRec}" +
+                ") SELECT k FROM a WHERE NOT (k::text = ANY(@p_ids))";
+
+            var raw = await QueryRowsAsync(conn, sql, parameters, src, CommandTimeoutSeconds, ct)
+                .ConfigureAwait(false);
+            var resultIds = raw
+                .Select(r => r.TryGetValue("k", out var v) && v is not null
+                    ? Convert.ToString(v, CultureInfo.InvariantCulture) ?? string.Empty
+                    : string.Empty)
+                .Where(s => s.Length > 0)
+                .ToList();
+            return new DatasetTreeAncestorsResult(DatasetRowsOutcome.Success, resultIds);
         }
         finally
         {

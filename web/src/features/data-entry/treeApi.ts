@@ -91,6 +91,31 @@ export function listTreeDescendantIds(
     .then((r) => r.ids ?? [])
 }
 
+// GET /api/data/{designerId}/tree/ancestors — ids of every ancestor of the given
+// nodes (recursive, walks up). Used to reveal/mark the path to a selection seeded
+// when editing a record. Empty `ids` short-circuits without a round-trip.
+export function listTreeAncestorIds(
+  designerId: string,
+  ids: string[],
+  authFilterColumn?: string,
+  dataset?: TreeDatasetSource,
+): Promise<string[]> {
+  const cleaned = ids.map((s) => s.trim()).filter(Boolean)
+  if (cleaned.length === 0) return Promise.resolve([])
+  const qs = new URLSearchParams({ ids: cleaned.join(',') })
+  if (authFilterColumn) qs.set('authFilterColumn', authFilterColumn)
+  if (dataset) {
+    qs.set('datasetId', dataset.datasetId)
+    qs.set('keyField', dataset.keyField)
+    qs.set('parentField', dataset.parentField)
+  }
+  return httpClient
+    .get<{ ids: string[] }>(
+      `/api/data/${encodeURIComponent(designerId)}/tree/ancestors?${qs.toString()}`,
+    )
+    .then((r) => r.ids ?? [])
+}
+
 // POST /api/data/{designerId}/tree — create a node. `parentId` null → a root node;
 // otherwise the new node is a child of that parent (writes the self-FK server-side).
 // `authFilterColumn`, when set, makes the server stamp it with the current user.

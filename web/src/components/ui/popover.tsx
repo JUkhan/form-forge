@@ -19,14 +19,18 @@ function PopoverContent({
   className,
   align = "start",
   sideOffset = 4,
+  forceMount,
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Content>) {
   return (
-    <PopoverPrimitive.Portal>
+    // Forward forceMount to the Portal too: keeping Content mounted requires the Portal
+    // to stay mounted as well, otherwise Radix unmounts the subtree on close.
+    <PopoverPrimitive.Portal forceMount={forceMount}>
       <PopoverPrimitive.Content
         data-slot="popover-content"
         align={align}
         sideOffset={sideOffset}
+        forceMount={forceMount}
         className={cn(
           "z-50 w-72 origin-(--radix-popover-content-transform-origin) rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className,

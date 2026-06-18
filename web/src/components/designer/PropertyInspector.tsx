@@ -2577,6 +2577,7 @@ function PropertyFields({
             updateProp={updateProp}
             help={t('designer.inspector.help.treeViewFieldKey')}
           />
+          <PgTypeField id={id} value={str('pgType')} updateProp={updateProp} />
           <RepeaterRowFormFields
             id={id}
             rowDesignerId={str('rowDesignerId')}
@@ -2607,6 +2608,15 @@ function PropertyFields({
               {t('designer.inspector.help.treeViewPageSize')}
             </span>
           </Field>
+          {/* Presentation-only toggle (applies in every mode): compact dropdown rendering. */}
+          <BoolField
+            label={t('designer.inspector.fields.isDropdownUi')}
+            checked={bool('isDropdownUi')}
+            onChange={(v) => updateProp(id, 'isDropdownUi', v)}
+          />
+          <p className="text-[10px] text-muted-foreground">
+            {t('designer.inspector.help.treeViewDropdownUi')}
+          </p>
           {/* View mode is the dominant toggle: read-only browse. When on it overrides
               and hides mutation + selection entirely (and clears them). */}
           <BoolField

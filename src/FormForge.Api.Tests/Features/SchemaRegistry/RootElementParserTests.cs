@@ -130,6 +130,39 @@ public class RootElementParserTests
     }
 
     [Fact]
+    public void Parse_TreeView_ExplicitPgType_OverridesTextDefault()
+    {
+        const string json = """
+            {"id":"root","type":"Stack","properties":{},"children":[
+                {"id":"tv1","type":"TreeView","properties":{"fieldKey":"selected_node","rowDesignerId":"org_unit","pgType":"uuid"},"children":[]}
+            ]}
+            """;
+
+        var (columns, _) = RootElementParser.ParseFull(json);
+
+        var col = Assert.Single(columns);
+        Assert.Equal("selected_node", col.ColumnName);
+        Assert.Equal("uuid", col.PgType);
+        Assert.Equal("TreeView", col.ComponentType);
+    }
+
+    [Fact]
+    public void Parse_TreeView_MalformedPgType_FallsBackToTextDefault()
+    {
+        const string json = """
+            {"id":"root","type":"Stack","properties":{},"children":[
+                {"id":"tv1","type":"TreeView","properties":{"fieldKey":"selected_node","pgType":"not-a-real-type; DROP TABLE"},"children":[]}
+            ]}
+            """;
+
+        var (columns, _) = RootElementParser.ParseFull(json);
+
+        var col = Assert.Single(columns);
+        Assert.Equal("selected_node", col.ColumnName);
+        Assert.Equal("TEXT", col.PgType);
+    }
+
+    [Fact]
     public void CollectTreeViewSelfRefIds_ReturnsNodeTemplateDesignerIds()
     {
         const string json = """

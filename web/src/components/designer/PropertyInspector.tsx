@@ -2577,6 +2577,7 @@ function PropertyFields({
             updateProp={updateProp}
             help={t('designer.inspector.help.treeViewFieldKey')}
           />
+          <PgTypeField id={id} value={str('pgType')} updateProp={updateProp} />
           <RepeaterRowFormFields
             id={id}
             rowDesignerId={str('rowDesignerId')}

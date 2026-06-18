@@ -75,6 +75,7 @@ export const DEFAULT_PGTYPE_BY_TYPE: Readonly<Record<string, string>> = {
   'Color Picker': 'text',
   Image: 'text',
   File: 'text',
+  TreeView: 'text',
 }
 
 // Component types that must carry a valid pgType at save time. Matches the keys

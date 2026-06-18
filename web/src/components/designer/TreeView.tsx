@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, ChevronsUpDown, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getFieldKey, type DesignerElement } from '@/types/designer'
 import {
@@ -15,6 +15,7 @@ import { updateRecord } from '@/features/data-entry/updateRecordApi'
 import { deleteRecord } from '@/features/data-entry/deleteRecordApi'
 import ElementRenderer, { type InteractiveFormProps } from './ElementRenderer'
 import RepeaterRowDrawer from './RepeaterRowDrawer'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -86,6 +87,25 @@ function TreeViewPreview({ element }: { element: DesignerElement }) {
   const mutate = !viewMode && (p.canCreate === true || p.canEdit === true || p.canDelete === true)
   const multi = !viewMode && p.isMultiSelect === true && !mutate
   const single = !viewMode && !mutate && !multi
+  const isDropdownUi = p.isDropdownUi === true
+
+  // Dropdown UI: show a closed trigger mock so the designer reflects the compact form.
+  if (isDropdownUi) {
+    return (
+      <div className="flex w-full flex-col gap-1" data-element-id={element.id}>
+        {label !== '' && <span className="text-xs font-medium text-foreground">{label}</span>}
+        <div
+          className={cn(
+            'flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-field-border bg-field px-3 py-2 text-sm text-placeholder',
+            typeof p.styleClasses === 'string' ? p.styleClasses : undefined,
+          )}
+        >
+          <span className="truncate">{t('designer.treeView.dropdownPlaceholder')}</span>
+          <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -269,10 +289,112 @@ function TreeViewInteractive({
   const [rootReload, setRootReload] = useState(0)
   const [banner, setBanner] = useState<string | null>(null)
   const [rootAddOpen, setRootAddOpen] = useState(false)
+  const [dropdownOpen, setDropdownOpen] = useState(false)
 
   const notifyError = useCallback((message: string) => setBanner(message), [])
 
   const notConfigured = rowDesignerId === ''
+  const isDropdownUi = p.isDropdownUi === true
+
+  // Shared inner content: error banner, the tree (or "not configured" notice), and the
+  // root-level add button. Rendered inline (normal) or inside the dropdown popover.
+  const treeBody = (
+    <>
+      {banner && (
+        <div className="border-b border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+          {banner}
+        </div>
+      )}
+      {notConfigured ? (
+        <p className="px-3 py-4 text-center text-xs text-muted-foreground">
+          {t('designer.renderer.rowFormStatusNotSet')}
+        </p>
+      ) : (
+        <SearchableLevel
+          designerId={rowDesignerId}
+          rowVersion={rowVersion}
+          parentId={null}
+          depth={0}
+          element={element}
+          mode={mode}
+          selection={selection}
+          pageSize={pageSize}
+          authFilterColumn={authFilterColumn}
+          datasetSource={datasetSource}
+          reloadSignal={rootReload}
+          onError={notifyError}
+        />
+      )}
+      {mode.canCreate && !notConfigured && (
+        <div className="border-t border-border px-3 py-2">
+          <button
+            type="button"
+            onClick={() => setRootAddOpen(true)}
+            className="inline-flex items-center gap-1 rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary-hover active:bg-primary-active"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t('designer.treeView.addRoot')}
+          </button>
+        </div>
+      )}
+    </>
+  )
+
+  const rootAddDrawer = rootAddOpen && (
+    <RepeaterRowDrawer
+      designerId={rowDesignerId}
+      version={rowVersion}
+      mode="add"
+      initialData={{}}
+      hiddenFieldKey={authFilterColumn}
+      onSave={(data) => {
+        createTreeNode(rowDesignerId, null, data, authFilterColumn)
+          .then(() => setRootReload((x) => x + 1))
+          .catch((e: unknown) => notifyError(errMessage(e)))
+      }}
+      onClose={() => setRootAddOpen(false)}
+    />
+  )
+
+  // Compact dropdown rendering: a trigger button summarising the selection that opens a
+  // popover holding the full tree. Behaviour (selection / mutation) is identical inside.
+  if (isDropdownUi) {
+    const selectedCount = selection.selected.size
+    const summary =
+      selectedCount > 0
+        ? t('designer.treeView.selectedCount', { count: selectedCount })
+        : t('designer.treeView.dropdownPlaceholder')
+    return (
+      <div className="flex w-full flex-col gap-1">
+        {label !== '' && <span className="text-xs font-medium text-foreground">{label}</span>}
+        <Popover open={dropdownOpen} onOpenChange={setDropdownOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              aria-expanded={dropdownOpen}
+              className={cn(
+                'flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-field-border bg-field px-3 py-2 text-sm outline-none hover:bg-overlay-hover active:bg-overlay-active focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50',
+                typeof p.styleClasses === 'string' ? p.styleClasses : undefined,
+              )}
+              data-element-id={element.id}
+            >
+              <span className={cn('truncate', selectedCount === 0 && 'text-placeholder')}>
+                {summary}
+              </span>
+              <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            className="max-h-80 w-(--radix-popover-trigger-width) overflow-y-auto p-0"
+            align="start"
+          >
+            {treeBody}
+          </PopoverContent>
+        </Popover>
+        {rootAddDrawer}
+      </div>
+    )
+  }
 
   return (
     <div className="flex w-full flex-col gap-1">
@@ -288,59 +410,9 @@ function TreeViewInteractive({
             {label}
           </div>
         )}
-        {banner && (
-          <div className="border-b border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
-            {banner}
-          </div>
-        )}
-        {notConfigured ? (
-          <p className="px-3 py-4 text-center text-xs text-muted-foreground">
-            {t('designer.renderer.rowFormStatusNotSet')}
-          </p>
-        ) : (
-          <SearchableLevel
-            designerId={rowDesignerId}
-            rowVersion={rowVersion}
-            parentId={null}
-            depth={0}
-            element={element}
-            mode={mode}
-            selection={selection}
-            pageSize={pageSize}
-            authFilterColumn={authFilterColumn}
-            datasetSource={datasetSource}
-            reloadSignal={rootReload}
-            onError={notifyError}
-          />
-        )}
-        {mode.canCreate && !notConfigured && (
-          <div className="border-t border-border px-3 py-2">
-            <button
-              type="button"
-              onClick={() => setRootAddOpen(true)}
-              className="inline-flex items-center gap-1 rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary-hover active:bg-primary-active"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              {t('designer.treeView.addRoot')}
-            </button>
-          </div>
-        )}
+        {treeBody}
       </div>
-      {rootAddOpen && (
-        <RepeaterRowDrawer
-          designerId={rowDesignerId}
-          version={rowVersion}
-          mode="add"
-          initialData={{}}
-          hiddenFieldKey={authFilterColumn}
-          onSave={(data) => {
-            createTreeNode(rowDesignerId, null, data, authFilterColumn)
-              .then(() => setRootReload((x) => x + 1))
-              .catch((e: unknown) => notifyError(errMessage(e)))
-          }}
-          onClose={() => setRootAddOpen(false)}
-        />
-      )}
+      {rootAddDrawer}
     </div>
   )
 }

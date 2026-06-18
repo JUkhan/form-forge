@@ -1077,6 +1077,7 @@
         "isMultiSelect": "Is multi-select",
         "viewMode": "View mode",
         "selectAll": "All select",
+        "isDropdownUi": "Is dropdown UI",
         "treeViewDataset": "Dataset source",
         "treeViewDatasetNone": "No dataset (use this component's table)",
         "treeViewDatasetKeyField": "Node id column",
@@ -1196,6 +1197,7 @@
         "treeViewMutualExclusion": "Create/Edit/Delete and multi-select are mutually exclusive — turning one on clears the other.",
         "treeViewViewMode": "Read-only browse. Disables add/edit/delete AND selection — users can only expand and search the tree.",
         "treeViewSelectAll": "Checking a node also selects its entire subtree (all descendants).",
+        "treeViewDropdownUi": "Render the tree inside a compact dropdown that opens on click — useful in tight layouts.",
         "treeViewAuthFilterColumn": "Optional. The node-template column that owns each record per user — stamped with the current user on the server and hidden on the form. Each user reads/edits only their own nodes scoped by this column."
       }
     },
@@ -1238,6 +1240,8 @@
       "deleteNode": "Delete node",
       "selectNode": "Select node",
       "containsSelection": "Contains a selected node",
+      "dropdownPlaceholder": "Select…",
+      "selectedCount": "{{count}} selected",
       "expand": "Expand",
       "collapse": "Collapse",
       "loadMore": "Load more",

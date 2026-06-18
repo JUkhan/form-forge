@@ -290,6 +290,9 @@ function TreeViewInteractive({
   const [banner, setBanner] = useState<string | null>(null)
   const [rootAddOpen, setRootAddOpen] = useState(false)
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  // Once opened, keep the popover's tree subtree mounted (see forceMount below) so the
+  // fetched levels, expansion and scroll survive close/reopen instead of refetching.
+  const [dropdownOpened, setDropdownOpened] = useState(false)
 
   const notifyError = useCallback((message: string) => setBanner(message), [])
 
@@ -367,7 +370,13 @@ function TreeViewInteractive({
     return (
       <div className="flex w-full flex-col gap-1">
         {label !== '' && <span className="text-xs font-medium text-foreground">{label}</span>}
-        <Popover open={dropdownOpen} onOpenChange={setDropdownOpen}>
+        <Popover
+          open={dropdownOpen}
+          onOpenChange={(next) => {
+            setDropdownOpen(next)
+            if (next) setDropdownOpened(true)
+          }}
+        >
           <PopoverTrigger asChild>
             <button
               type="button"
@@ -385,7 +394,10 @@ function TreeViewInteractive({
             </button>
           </PopoverTrigger>
           <PopoverContent
-            className="max-h-80 w-(--radix-popover-trigger-width) overflow-y-auto p-0"
+            // forceMount (after first open) keeps the tree mounted while closed — hidden
+            // via data-closed:hidden — so reopening reuses the already-fetched levels.
+            forceMount={dropdownOpened ? true : undefined}
+            className="max-h-80 w-(--radix-popover-trigger-width) overflow-y-auto p-0 data-closed:hidden"
             align="start"
           >
             {treeBody}

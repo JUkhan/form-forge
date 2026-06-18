@@ -7,6 +7,7 @@ import {
   listTreeNodes,
   createTreeNode,
   listTreeDescendantIds,
+  listTreeAncestorIds,
   type TreeNode,
   type TreeDatasetSource,
 } from '@/features/data-entry/treeApi'
@@ -44,6 +45,12 @@ interface TreeSelection {
   // "All select": checking a node cascades to its whole subtree (multi mode only).
   selectAll: boolean
   radioName: string
+  // Ids of nodes that are an ANCESTOR of a (seed) selected node. Lets a collapsed row
+  // show a "selection inside" marker and — in single mode — auto-expand the path to it.
+  // Computed once from the value seeded on mount (see note in TreeViewInteractive).
+  ancestorIds: Set<string>
+  // Single-select only: auto-expand the path to the seeded selection on load.
+  autoExpand: boolean
 }
 
 // Per-node action capabilities, derived once from the TreeView properties.
@@ -192,6 +199,29 @@ function TreeViewInteractive({
 
   const [selected, setSelected] = useState<Set<string>>(seedIds)
 
+  // Ancestor reveal — resolve the ancestor chain of the SEEDED selection once on mount
+  // (e.g. when editing a record whose TreeView value points at deep, collapsed nodes).
+  // We deliberately key off the seed, not live `selected`: it answers "where are my saved
+  // selections" without an API round-trip per toggle, and freshly toggled nodes are
+  // already on screen. Single-select auto-expands to the node; multi only marks ancestors.
+  const [ancestorIds, setAncestorIds] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    if (selectionMode === 'none' || rowDesignerId === '' || seedIds.size === 0) return
+    let cancelled = false
+    listTreeAncestorIds(rowDesignerId, Array.from(seedIds), authFilterColumn, datasetSource)
+      .then((ids) => {
+        if (!cancelled) setAncestorIds(new Set(ids))
+      })
+      .catch(() => {
+        /* indicator is a best-effort hint; ignore failures */
+      })
+    return () => {
+      cancelled = true
+    }
+    // Seed-driven, so depends only on the resolved seed + its tree source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowDesignerId, authFilterColumn, datasetSource])
+
   const toggle = useCallback(
     (id: string) => {
       setSelected((prev) => {
@@ -231,6 +261,8 @@ function TreeViewInteractive({
     setMany,
     selectAll: selectAllEnabled,
     radioName,
+    ancestorIds,
+    autoExpand: selectionMode === 'single',
   }
 
   // Root-level reload token (bumped after a root-level add).
@@ -490,7 +522,11 @@ function TreeNodeRow({
   const hasChildren = node._has_children === true
   const templateChildren = element.children ?? []
 
-  const [expanded, setExpanded] = useState(false)
+  // Tri-state expand: null = follow the auto-expand default, true/false = user override.
+  // Deriving `expanded` (rather than forcing it via an effect) avoids a cascading render
+  // when the ancestor set resolves asynchronously, yet still lets the user collapse a
+  // branch that was auto-expanded to reveal a selection.
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
   const [childReload, setChildReload] = useState(0)
   const [drawer, setDrawer] = useState<null | { mode: 'add' | 'edit' }>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -513,6 +549,14 @@ function TreeNodeRow({
   }, [designerId, id, authFilterColumn, onSelfChanged, onError])
 
   const isSelected = selection.selected.has(id)
+  // This node sits on the path to a (seed) selection but isn't itself selected.
+  const hasSelectedDescendant = !isSelected && selection.ancestorIds.has(id)
+
+  // Single-select reveal: default-open the path to the seeded selection. As the ancestor
+  // set resolves (async) this flips true and cascades — each revealed ancestor renders its
+  // children, whose rows in turn default-open down to the selected node. A user override
+  // (collapse/expand) wins over the default.
+  const expanded = userExpanded ?? (selection.autoExpand && hasSelectedDescendant)
 
   // "All select": checking a node selects its whole subtree. Descendant ids are
   // fetched recursively (covers un-expanded branches); otherwise toggle just this node.
@@ -555,10 +599,17 @@ function TreeNodeRow({
             className="h-3.5 w-3.5 shrink-0 cursor-pointer"
           />
         )}
+        {hasSelectedDescendant && (
+          <span
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
+            title={t('designer.treeView.containsSelection')}
+            aria-label={t('designer.treeView.containsSelection')}
+          />
+        )}
         {hasChildren ? (
           <button
             type="button"
-            onClick={() => setExpanded((x) => !x)}
+            onClick={() => setUserExpanded(!expanded)}
             aria-label={expanded ? t('designer.treeView.collapse') : t('designer.treeView.expand')}
             className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
           >
@@ -650,7 +701,7 @@ function TreeNodeRow({
                   onSelfChanged()
                 } else {
                   // New child added — expand and reload this node's children.
-                  setExpanded(true)
+                  setUserExpanded(true)
                   setChildReload((x) => x + 1)
                   // The node may have flipped from leaf → parent; refresh this level too.
                   onSelfChanged()

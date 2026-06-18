@@ -1237,6 +1237,7 @@
       "editNode": "Edit node",
       "deleteNode": "Delete node",
       "selectNode": "Select node",
+      "containsSelection": "Contains a selected node",
       "expand": "Expand",
       "collapse": "Collapse",
       "loadMore": "Load more",

@@ -92,6 +92,19 @@ internal static class DynamicDataEndpoints
              .Produces<ProblemDetails>(StatusCodes.Status422UnprocessableEntity)
              .RequirePermission("read");
 
+        // TreeView ancestor reveal — GET /api/data/{designerId}/tree/ancestors?ids=a,b,c.
+        // Returns the ids of every ancestor of the given (selected) nodes, so a selection
+        // seeded when editing a record can be marked on / auto-expanded to its ancestors
+        // without expanding every branch by hand. The "/tree/ancestors" literal precedes
+        // "/{id:guid}".
+        group.MapGet("/tree/ancestors", ListTreeAncestorsHandler)
+             .WithSummary("List the ancestor ids of a set of TreeView nodes (recursive, walks up).")
+             .Produces<TreeAncestorsResult>(StatusCodes.Status200OK)
+             .Produces<ProblemDetails>(StatusCodes.Status403Forbidden)
+             .Produces<ProblemDetails>(StatusCodes.Status404NotFound)
+             .Produces<ProblemDetails>(StatusCodes.Status422UnprocessableEntity)
+             .RequirePermission("read");
+
         // TreeView — POST /api/data/{designerId}/tree. Creates a node, writing the
         // self-FK parent_<table>_id from the body's `parentId` (null → a root node).
         // Mutate mode hits the backend directly (no parent-form batching). The literal
@@ -550,6 +563,99 @@ internal static class DynamicDataEndpoints
                 .ToList();
 
             return Results.Ok(new TreeDescendantsResult(ids));
+        }
+        finally
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    // TreeView ancestor reveal — the ancestor ids of a set of (selected) nodes, so a
+    // selection seeded on edit can be marked/auto-expanded without walking the whole tree.
+    internal static async Task<IResult> ListTreeAncestorsHandler(
+        string designerId,
+        HttpContext httpContext,
+        FormForgeDbContext db,
+        ISchemaRegistry schemaRegistry,
+        DbConnectionFactory connectionFactory,
+        DdlEmitter ddlEmitter,
+        IDatasetRowQueryService datasetRowQueryService,
+        CancellationToken ct,
+        string? ids = null,
+        string? authFilterColumn = null,
+        string? datasetId = null,
+        string? keyField = null,
+        string? parentField = null)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(schemaRegistry);
+        ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(datasetRowQueryService);
+
+        if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
+            return Problems.ValidationFailed("Invalid designer identifier.");
+
+        var idList = (ids ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (idList.Length == 0)
+            return Results.Ok(new TreeAncestorsResult(Array.Empty<string>()));
+
+        // Dataset-backed tree: ancestor key values come from the dataset VIEW (recursive).
+        if (Guid.TryParse(datasetId, out var treeDatasetId)
+            && !string.IsNullOrWhiteSpace(keyField)
+            && !string.IsNullOrWhiteSpace(parentField))
+        {
+            var authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var duid)
+                ? duid : (Guid?)null;
+            var dResult = await datasetRowQueryService.GetTreeAncestorsAsync(
+                treeDatasetId, keyField!.Trim(), parentField!.Trim(), idList,
+                NormalizeDatasetAuthColumn(authFilterColumn), ct, authUserId).ConfigureAwait(false);
+            return dResult.Outcome switch
+            {
+                DatasetRowsOutcome.Success => Results.Ok(new TreeAncestorsResult(dResult.Ids ?? Array.Empty<string>())),
+                DatasetRowsOutcome.NotFound => Results.Ok(new TreeAncestorsResult(Array.Empty<string>())),
+                _ => Problems.ValidationFailed(dResult.ErrorDetail ?? "Invalid dataset tree query."),
+            };
+        }
+
+        // Provisioned-table tree: the node ids are UUIDs. Drop any unparseable token.
+        var guids = new List<Guid>(idList.Length);
+        foreach (var s in idList)
+            if (Guid.TryParse(s, CultureInfo.InvariantCulture, out var g)) guids.Add(g);
+        if (guids.Count == 0)
+            return Results.Ok(new TreeAncestorsResult(Array.Empty<string>()));
+
+        var boundVersion = await ResolveEffectiveVersionAsync(db, safeId!.Value, ct).ConfigureAwait(false);
+        if (boundVersion is null)
+            return Problems.TableNotProvisioned();
+
+        var entry = await GetOrPopulateEntryAsync(db, schemaRegistry, safeId!.Value, boundVersion.Value, ct)
+            .ConfigureAwait(false);
+        var ownerResult = ResolveTreeOwnerFilter(authFilterColumn, entry, httpContext, out var ownerColumn, out var ownerId);
+        if (ownerResult is not null) return ownerResult;
+
+        var fkColumnName = DynamicQueryBuilder.BuildFkColumnName(safeId!.Value);
+
+        var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+            {
+                await ddlEmitter.EnsureSelfReferenceColumnAsync(safeId!.Value, ct).ConfigureAwait(false);
+                if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+                    // No self-FK → the nodes are flat, so they have no ancestors.
+                    return Results.Ok(new TreeAncestorsResult(Array.Empty<string>()));
+            }
+
+            var (sql, parameters) = DynamicQueryBuilder.BuildTreeAncestorIdsQuery(
+                safeId, fkColumnName, guids, ownerColumn, ownerId);
+            var resultIds = (await conn.QueryAsync<Guid>(new CommandDefinition(
+                sql, parameters, commandTimeout: 5, cancellationToken: ct)).ConfigureAwait(false))
+                .Select(g => g.ToString())
+                .ToList();
+
+            return Results.Ok(new TreeAncestorsResult(resultIds));
         }
         finally
         {
@@ -2053,6 +2159,9 @@ internal static class DynamicDataEndpoints
 
     // TreeView "All select" — recursive descendant ids of a node (camelCase `ids`).
     internal sealed record TreeDescendantsResult(IReadOnlyList<string> Ids);
+
+    // TreeView ancestor reveal — recursive ancestor ids of a node set (camelCase `ids`).
+    internal sealed record TreeAncestorsResult(IReadOnlyList<string> Ids);
 
     // Validates an optional TreeView auth-filter column and resolves the requesting user
     // id. Returns null on success (out params set when a filter is requested); otherwise an

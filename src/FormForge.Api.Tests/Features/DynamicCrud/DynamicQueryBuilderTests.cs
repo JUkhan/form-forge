@@ -1272,6 +1272,43 @@ public class DynamicQueryBuilderTests
         Assert.Equal(owner, parameters.Get<Guid>("p_owner_id"));
     }
 
+    [Fact]
+    public void BuildTreeAncestorIdsQuery_WalksUpSelfFk_ExcludesSeedsAndFiltersLiveRows()
+    {
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+        var (sql, parameters) = DynamicQueryBuilder.BuildTreeAncestorIdsQuery(
+            MakeTable("org_unit"), "parent_org_unit_id", new[] { a, b });
+
+        Assert.Contains("WITH RECURSIVE ancestors AS", sql, StringComparison.Ordinal);
+        // Anchor: the seed nodes themselves (matched by id against the array param).
+        Assert.Contains("\"id\" = ANY(@p_ids)", sql, StringComparison.Ordinal);
+        // Recursive term joins each row to a collected child via the self-FK (walks up).
+        Assert.Contains("JOIN ancestors a ON p.\"id\" = a.parent_id", sql, StringComparison.Ordinal);
+        // The seeds are excluded from the result — only their ancestors are returned.
+        Assert.Contains("WHERE NOT (\"id\" = ANY(@p_ids))", sql, StringComparison.Ordinal);
+        // UNION (not UNION ALL) so shared ancestors / cyclic chains still terminate.
+        Assert.DoesNotContain("UNION ALL", sql, StringComparison.Ordinal);
+        // Live rows only, at both levels.
+        Assert.Equal(2, CountOccurrences(sql, "\"is_deleted\" = false"));
+        Assert.Equal(new[] { a, b }, parameters.Get<Guid[]>("p_ids"));
+    }
+
+    [Fact]
+    public void BuildTreeAncestorIdsQuery_WithOwnerFilter_ScopesBothCteTerms()
+    {
+        var owner = Guid.NewGuid();
+        var (sql, parameters) = DynamicQueryBuilder.BuildTreeAncestorIdsQuery(
+            MakeTable("org_unit"), "parent_org_unit_id", new[] { Guid.NewGuid() },
+            ownerColumn: "owner_id", ownerId: owner);
+
+        // Anchor term filters the seed nodes by owner…
+        Assert.Contains("\"owner_id\" = @p_owner_id", sql, StringComparison.Ordinal);
+        // …and the recursive term filters walked-up rows by owner too.
+        Assert.Contains("p.\"owner_id\" = @p_owner_id", sql, StringComparison.Ordinal);
+        Assert.Equal(owner, parameters.Get<Guid>("p_owner_id"));
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         int count = 0, i = 0;

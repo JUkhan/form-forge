@@ -13,6 +13,7 @@ import {
 } from '@/features/data-entry/treeApi'
 import { updateRecord } from '@/features/data-entry/updateRecordApi'
 import { deleteRecord } from '@/features/data-entry/deleteRecordApi'
+import { getRecord } from '@/features/data-entry/recordApi'
 import ElementRenderer, { type InteractiveFormProps } from './ElementRenderer'
 import RepeaterRowDrawer from './RepeaterRowDrawer'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -29,6 +30,10 @@ import {
 
 const NOOP_CHANGE = () => {}
 const DEFAULT_PAGE_SIZE = 25
+// The dropdown trigger lists selected node names up to this count; beyond it (or when a
+// name isn't known yet) it falls back to an "N selected" summary. Also caps how many
+// labels are fetched to seed the trigger on edit.
+const MAX_LABEL_DISPLAY = 3
 
 function toRowVersion(v: unknown): number | undefined {
   const n = Number(v)
@@ -52,6 +57,11 @@ interface TreeSelection {
   ancestorIds: Set<string>
   // Single-select only: auto-expand the path to the seeded selection on load.
   autoExpand: boolean
+  // The node-record field used as a human label (first template field). '' = none.
+  labelKey: string
+  // Records a node's display label as it's selected, so the dropdown trigger can show
+  // names instead of a count. Captured from the row at toggle time (and seeded on edit).
+  registerLabel: (id: string, label: string) => void
 }
 
 // Per-node action capabilities, derived once from the TreeView properties.
@@ -242,6 +252,50 @@ function TreeViewInteractive({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowDesignerId, authFilterColumn, datasetSource])
 
+  // The label for a node = its first template field's value. Used only by the dropdown
+  // trigger to show selected names instead of a count. Row-template fields are
+  // `Repeater Field` leaves that name their column via `fieldName` (NOT fieldKey/bindTo),
+  // and may sit inside layout containers — so walk the subtree in document order.
+  const labelKey = useMemo(() => firstTemplateFieldName(element.children ?? []), [element.children])
+
+  const [labelById, setLabelById] = useState<Record<string, string>>({})
+  const registerLabel = useCallback(
+    (id: string, label: string) => {
+      // Labels are only surfaced by the dropdown trigger; skip the state churn otherwise.
+      if (p.isDropdownUi !== true) return
+      setLabelById((prev) => (prev[id] === label ? prev : { ...prev, [id]: label }))
+    },
+    [p.isDropdownUi],
+  )
+
+  // Seed the trigger labels for the value loaded on mount (edit). Only the
+  // provisioned-table tree can resolve a node by id; dataset-backed trees fall back to
+  // capturing labels as rows are selected. Capped at MAX_LABEL_DISPLAY since beyond that
+  // the trigger shows a count, not names.
+  useEffect(() => {
+    if (p.isDropdownUi !== true || selectionMode === 'none') return
+    if (labelKey === '' || datasetSource || rowDesignerId === '') return
+    const ids = Array.from(seedIds)
+    if (ids.length === 0 || ids.length > MAX_LABEL_DISPLAY) return
+    let cancelled = false
+    Promise.allSettled(ids.map((rid) => getRecord(rowDesignerId, rid))).then((results) => {
+      if (cancelled) return
+      const next: Record<string, string> = {}
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') {
+          const raw = (r.value as Record<string, unknown>)[labelKey]
+          if (raw != null && String(raw).trim() !== '') next[ids[i]] = String(raw).trim()
+        }
+      })
+      if (Object.keys(next).length > 0) setLabelById((prev) => ({ ...next, ...prev }))
+    })
+    return () => {
+      cancelled = true
+    }
+    // Seed-driven (same rationale as the ancestor effect above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowDesignerId, labelKey, datasetSource])
+
   const toggle = useCallback(
     (id: string) => {
       setSelected((prev) => {
@@ -283,6 +337,8 @@ function TreeViewInteractive({
     radioName,
     ancestorIds,
     autoExpand: selectionMode === 'single',
+    labelKey,
+    registerLabel,
   }
 
   // Root-level reload token (bumped after a root-level add).
@@ -362,11 +418,18 @@ function TreeViewInteractive({
   // Compact dropdown rendering: a trigger button summarising the selection that opens a
   // popover holding the full tree. Behaviour (selection / mutation) is identical inside.
   if (isDropdownUi) {
-    const selectedCount = selection.selected.size
+    const selectedIds = Array.from(selection.selected)
+    const selectedCount = selectedIds.length
+    const knownLabels = selectedIds
+      .map((sid) => labelById[sid])
+      .filter((l): l is string => typeof l === 'string' && l !== '')
+    // Show names when we know all of them and there aren't too many; otherwise a count.
     const summary =
-      selectedCount > 0
-        ? t('designer.treeView.selectedCount', { count: selectedCount })
-        : t('designer.treeView.dropdownPlaceholder')
+      selectedCount === 0
+        ? t('designer.treeView.dropdownPlaceholder')
+        : knownLabels.length === selectedCount && selectedCount <= MAX_LABEL_DISPLAY
+          ? knownLabels.join(', ')
+          : t('designer.treeView.selectedCount', { count: selectedCount })
     return (
       <div className="flex w-full flex-col gap-1">
         {label !== '' && <span className="text-xs font-medium text-foreground">{label}</span>}
@@ -618,6 +681,14 @@ function TreeNodeRow({
 
   const rowFormData = useMemo<Record<string, unknown>>(() => ({ ...node }), [node])
 
+  // This node's human label (first template field), captured on select so the dropdown
+  // trigger can show names. No-op when there's no label field.
+  const captureLabel = useCallback(() => {
+    if (selection.labelKey === '') return
+    const raw = (node as Record<string, unknown>)[selection.labelKey]
+    if (raw != null && String(raw).trim() !== '') selection.registerLabel(id, String(raw).trim())
+  }, [node, id, selection])
+
   const confirmDelete = useCallback(() => {
     setDeleting(true)
     deleteRecord(designerId, id, authFilterColumn)
@@ -645,6 +716,7 @@ function TreeNodeRow({
   // "All select": checking a node selects its whole subtree. Descendant ids are
   // fetched recursively (covers un-expanded branches); otherwise toggle just this node.
   const handleMultiToggle = useCallback(() => {
+    captureLabel()
     if (selection.selectAll && hasChildren) {
       const willSelect = !selection.selected.has(id)
       listTreeDescendantIds(designerId, id, authFilterColumn, datasetSource)
@@ -653,7 +725,7 @@ function TreeNodeRow({
     } else {
       selection.toggle(id)
     }
-  }, [selection, hasChildren, id, designerId, authFilterColumn, datasetSource, onError])
+  }, [captureLabel, selection, hasChildren, id, designerId, authFilterColumn, datasetSource, onError])
 
   return (
     <li>
@@ -678,7 +750,10 @@ function TreeNodeRow({
             type="radio"
             name={selection.radioName}
             checked={isSelected}
-            onChange={() => selection.toggle(id)}
+            onChange={() => {
+              captureLabel()
+              selection.toggle(id)
+            }}
             aria-label={t('designer.treeView.selectNode')}
             className="h-3.5 w-3.5 shrink-0 cursor-pointer"
           />
@@ -818,6 +893,24 @@ function TreeNodeRow({
       </AlertDialog>
     </li>
   )
+}
+
+// Document-order search for the first `Repeater Field` leaf with a column binding,
+// returning its `fieldName` (the node-record key, == DB column). Mirrors the column
+// discovery that ElementRenderer's collectRepeaterFields does for the table view.
+function firstTemplateFieldName(nodes: DesignerElement[]): string {
+  for (const node of nodes) {
+    if (node.type === 'Repeater Field') {
+      const fn = node.properties.fieldName
+      if (typeof fn === 'string' && fn.trim() !== '') return fn.trim()
+      continue
+    }
+    if (node.children && node.children.length > 0) {
+      const found = firstTemplateFieldName(node.children)
+      if (found !== '') return found
+    }
+  }
+  return ''
 }
 
 function errMessage(e: unknown): string {

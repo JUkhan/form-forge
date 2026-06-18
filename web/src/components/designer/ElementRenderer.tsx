@@ -419,7 +419,7 @@ function TabsRenderer({
     return (
       <div
         className={cn(
-          'flex border border-dashed border-border',
+          'flex overflow-hidden rounded-md border border-dashed border-border',
           typeof element.properties.styleClasses === 'string' ? element.properties.styleClasses : undefined,
         )}
       >
@@ -481,7 +481,9 @@ function TabsRenderer({
         // min-w-0 lets this container shrink below its tab-strip's intrinsic
         // width when it sits inside a flex parent (Stack/Row), so a long row
         // of tabs scrolls instead of blowing past the host's right edge.
-        'min-w-0 border border-dashed border-border',
+        // overflow-hidden clips the tab-strip's bg-muted fill to the rounded
+        // top corners (Radix popovers/dropdowns portal out, so they're unaffected).
+        'min-w-0 overflow-hidden rounded-md border border-dashed border-border',
         typeof element.properties.styleClasses === 'string' ? element.properties.styleClasses : undefined,
       )}
     >
@@ -505,7 +507,7 @@ function TabsRenderer({
               onClick={() => setActiveTabId(c.id)}
               aria-label={hasErrors ? `${label} (has validation errors)` : label}
               className={cn(
-                'flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium transition-colors',
+                'flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3.5 py-2.5 text-xs font-medium transition-colors',
                 isActive
                   ? 'border-b-2 border-primary text-primary'
                   : 'text-muted-foreground hover:text-foreground',

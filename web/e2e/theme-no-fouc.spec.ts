@@ -46,16 +46,8 @@ test.describe('Theme: no flash of default-light (FOUC prevention)', () => {
 
     await mockAuth(page)
 
-    // Listen for domcontentloaded — the inline script fires BEFORE this event,
-    // so data-theme should already reflect 'slate-dark' at DOMContentLoaded.
-    let dataThemeAtDcl: string | null = null
-    page.on('domcontentloaded', async () => {
-      // Evaluate synchronously in the page context
-      dataThemeAtDcl = await page.evaluate(
-        () => document.documentElement.getAttribute('data-theme'),
-      )
-    })
-
+    // The inline script fires BEFORE domcontentloaded, so data-theme should already
+    // reflect 'slate-dark' once the DOM is ready (asserted right after navigation).
     await page.goto('/', { waitUntil: 'domcontentloaded' })
 
     // Verify data-theme is 'slate-dark' immediately at DOMContentLoaded

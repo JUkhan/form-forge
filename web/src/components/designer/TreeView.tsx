@@ -69,13 +69,23 @@ interface TreeSelection {
 // Entire-tree search reveal state. Independent of selection (works in every mode): when a
 // whole-tree search matches, `ancestorIds` holds the matched node's ancestors (so each is
 // auto-expanded down the path) and `matchedId` is the matched node itself (highlighted +
-// scrolled into view). Both empty when no search is active.
+// scrolled into view).
+//
+// `pathChildByParent` maps each level's parent id (the root level under the '' key) to the
+// path node that level MUST contain. SearchableLevel injects it if its own (paginated) fetch
+// didn't return it, so the path is always visible no matter how deep/late in a page the
+// matched node lives — without it the auto-expand cascade can't start. Empty when no search.
 interface TreeReveal {
   ancestorIds: Set<string>
   matchedId: string | null
+  pathChildByParent: Map<string, TreeNode>
 }
 
-const EMPTY_REVEAL: TreeReveal = { ancestorIds: new Set(), matchedId: null }
+const EMPTY_REVEAL: TreeReveal = {
+  ancestorIds: new Set(),
+  matchedId: null,
+  pathChildByParent: new Map(),
+}
 
 // Per-node action capabilities, derived once from the TreeView properties.
 interface TreeMode {
@@ -406,7 +416,18 @@ function TreeViewInteractive({
           return
         }
         const ids = path.map((n) => String(n.id))
-        setReveal({ ancestorIds: new Set(ids.slice(0, -1)), matchedId: ids[ids.length - 1] })
+        // Map each level to its path node: the root level under '', then each node under
+        // its parent's id — so every level can inject its path child if paging hid it.
+        const pathChildByParent = new Map<string, TreeNode>()
+        pathChildByParent.set('', path[0])
+        for (let i = 1; i < path.length; i++) {
+          pathChildByParent.set(String(path[i - 1].id), path[i])
+        }
+        setReveal({
+          ancestorIds: new Set(ids.slice(0, -1)),
+          matchedId: ids[ids.length - 1],
+          pathChildByParent,
+        })
         setSearchMsg(null)
       })
       .catch((e: unknown) => {
@@ -669,6 +690,16 @@ function SearchableLevel({
   // Per-level search is the default; whole-tree search replaces it (so hide this box then).
   const showSearch = !entireSearch && (everHadNext || search !== '')
 
+  // Whole-tree search: make sure this level shows its path node even if the matched node's
+  // ancestor wasn't on the fetched page — prepend it when missing. Keyed by this level's
+  // parent (the root level under ''). This is what lets the auto-expand cascade reach a deep
+  // match; without it the reveal silently does nothing when the path falls outside page 1.
+  const pathChild = reveal.pathChildByParent.get(parentId ?? '')
+  const displayRows = useMemo(() => {
+    if (!pathChild || rows.some((r) => String(r.id) === String(pathChild.id))) return rows
+    return [pathChild, ...rows]
+  }, [rows, pathChild])
+
   return (
     <div className="flex flex-col">
       {showSearch && (
@@ -687,7 +718,7 @@ function SearchableLevel({
         </div>
       )}
       <ul>
-        {rows.length === 0 && !loading ? (
+        {displayRows.length === 0 && !loading ? (
           <li
             className="px-3 py-2 text-xs text-muted-foreground"
             style={{ paddingLeft: `${12 + depth * 18}px` }}
@@ -695,7 +726,7 @@ function SearchableLevel({
             {search !== '' ? t('designer.treeView.noMatches') : t('designer.renderer.noRowsYet')}
           </li>
         ) : (
-          rows.map((node) => (
+          displayRows.map((node) => (
             <TreeNodeRow
               key={String(node.id)}
               node={node}

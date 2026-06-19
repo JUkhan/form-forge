@@ -486,7 +486,7 @@ function TreeViewInteractive({
         <div className="flex flex-col gap-1 border-b border-border px-3 py-2">
           <div className="relative">
             <Search
-              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+              className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
               aria-hidden
             />
             <input
@@ -494,7 +494,7 @@ function TreeViewInteractive({
               value={treeSearchInput}
               onChange={(e) => setTreeSearchInput(e.target.value)}
               placeholder={t('designer.treeView.searchTreePlaceholder')}
-              className="h-7 w-full rounded border border-field-border bg-field pl-7 pr-7 text-xs text-foreground placeholder:text-placeholder"
+              className="h-9 w-full rounded-lg border border-field-border bg-field pl-9 pr-9 text-sm text-foreground placeholder:text-placeholder outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
             />
             {treeSearchInput !== '' && (
               <button
@@ -506,9 +506,9 @@ function TreeViewInteractive({
                   setSearchMsg(null)
                 }}
                 aria-label={t('designer.treeView.clearSearch')}
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
               >
-                <X className="h-3.5 w-3.5" />
+                <X className="h-4 w-4" />
               </button>
             )}
           </div>

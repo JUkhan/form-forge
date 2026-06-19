@@ -1251,6 +1251,7 @@
       "loadMore": "Load more",
       "searchPlaceholder": "Search…",
       "searchTreePlaceholder": "Search the entire tree…",
+      "clearSearch": "Clear search",
       "noMatches": "No matching nodes",
       "confirmDelete": "Delete this node and all of its descendants?",
       "delete": "Delete",

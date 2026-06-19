@@ -16,6 +16,7 @@ import { parseTreeSearchFilter, resolveTreeSearchFilter } from './treeSearchFilt
 import { updateRecord } from '@/features/data-entry/updateRecordApi'
 import { deleteRecord } from '@/features/data-entry/deleteRecordApi'
 import { getRecord } from '@/features/data-entry/recordApi'
+import { fetchDatasetRows } from '@/features/datasets/datasetApi'
 import ElementRenderer, { type InteractiveFormProps } from './ElementRenderer'
 import RepeaterRowDrawer from './RepeaterRowDrawer'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -291,27 +292,55 @@ function TreeViewInteractive({
     [p.isDropdownUi],
   )
 
-  // Seed the trigger labels for the value loaded on mount (edit). Only the
-  // provisioned-table tree can resolve a node by id; dataset-backed trees fall back to
-  // capturing labels as rows are selected. Capped at MAX_LABEL_DISPLAY since beyond that
-  // the trigger shows a count, not names.
+  // Seed the trigger labels for the value loaded on mount (edit). The provisioned-table tree
+  // resolves each node by id; a dataset-backed tree reads the dataset rows whose key is in the
+  // seed set (the label column is a dataset column, same as the displayed template field).
+  // Capped at MAX_LABEL_DISPLAY since beyond that the trigger shows a count, not names.
   useEffect(() => {
-    if (p.isDropdownUi !== true || selectionMode === 'none') return
-    if (labelKey === '' || datasetSource || rowDesignerId === '') return
+    if (p.isDropdownUi !== true || selectionMode === 'none' || labelKey === '') return
     const ids = Array.from(seedIds)
     if (ids.length === 0 || ids.length > MAX_LABEL_DISPLAY) return
     let cancelled = false
-    Promise.allSettled(ids.map((rid) => getRecord(rowDesignerId, rid))).then((results) => {
-      if (cancelled) return
-      const next: Record<string, string> = {}
-      results.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          const raw = (r.value as Record<string, unknown>)[labelKey]
-          if (raw != null && String(raw).trim() !== '') next[ids[i]] = String(raw).trim()
-        }
+    const apply = (next: Record<string, string>) => {
+      if (!cancelled && Object.keys(next).length > 0) setLabelById((prev) => ({ ...next, ...prev }))
+    }
+
+    if (datasetSource) {
+      // Read the seed rows from the dataset (key IN seedIds) and map keyField → label.
+      const filters = {
+        id: 'root',
+        kind: 'group',
+        combinator: 'AND',
+        items: [
+          { id: 'seed', kind: 'condition', tableName: '', columnName: datasetSource.keyField, operator: 'IN', value: ids },
+        ],
+      }
+      fetchDatasetRows(datasetSource.datasetId, { filters, pageSize: ids.length })
+        .then((page) => {
+          const next: Record<string, string> = {}
+          for (const row of page.data) {
+            const rec = row as Record<string, unknown>
+            const rid = rec[datasetSource.keyField]
+            const raw = rec[labelKey]
+            if (rid != null && raw != null && String(raw).trim() !== '') next[String(rid)] = String(raw).trim()
+          }
+          apply(next)
+        })
+        .catch(() => {
+          /* trigger labels are a best-effort hint; ignore failures */
+        })
+    } else if (rowDesignerId !== '') {
+      Promise.allSettled(ids.map((rid) => getRecord(rowDesignerId, rid))).then((results) => {
+        const next: Record<string, string> = {}
+        results.forEach((r, i) => {
+          if (r.status === 'fulfilled') {
+            const raw = (r.value as Record<string, unknown>)[labelKey]
+            if (raw != null && String(raw).trim() !== '') next[ids[i]] = String(raw).trim()
+          }
+        })
+        apply(next)
       })
-      if (Object.keys(next).length > 0) setLabelById((prev) => ({ ...next, ...prev }))
-    })
+    }
     return () => {
       cancelled = true
     }

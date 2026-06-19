@@ -2,9 +2,8 @@
 // i18n orphan-detection script (Story 7.6 AC-4).
 // Reports keys in en.json with no t() callsite (orphaned — warning),
 // and t() callsites with no en.json entry (missing — exit 1).
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { resolve, join } from 'node:path'
-import { glob } from 'glob'
 
 const projectRoot = resolve(import.meta.dirname, '..')
 const localesDir = join(projectRoot, 'src/lib/i18n/locales')
@@ -30,11 +29,13 @@ const jsonKeys = flattenKeys(enJson)
 // Dynamic args like t(err.messageKey) are intentionally excluded.
 const T_LITERAL = /\bt\(\s*['"]([^'"]+)['"]/g
 
-const files = await glob('**/*.{ts,tsx}', {
-  cwd: srcDir,
-  ignore: ['**/__tests__/**', '**/*.test.*', '**/*.spec.*'],
-  absolute: true,
-})
+// Collect every .ts/.tsx under src/ via Node's built-in recursive readdir (no external
+// `glob` dependency — it was undeclared and broke `npm ci` runs). Skip test files and
+// __tests__ dirs, matching the previous ignore globs.
+const files = readdirSync(srcDir, { recursive: true, withFileTypes: true })
+  .filter((d) => d.isFile() && /\.(ts|tsx)$/.test(d.name))
+  .map((d) => join(d.parentPath ?? d.path, d.name))
+  .filter((f) => !/[\\/]__tests__[\\/]/.test(f) && !/\.(test|spec)\./.test(f))
 
 const codeKeys = new Set()
 for (const file of files) {

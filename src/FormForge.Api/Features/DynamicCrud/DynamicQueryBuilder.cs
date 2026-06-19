@@ -502,6 +502,96 @@ internal static class DynamicQueryBuilder
         return (sql, parameters);
     }
 
+    // TreeView "entire tree search" — recursive ancestor-path search over the provisioned
+    // (designer) table. Finds the FIRST node matching `searchConditionSql` (a parameterized
+    // predicate built by DatasetFilterWhereBuilder, WITHOUT a leading WHERE), then walks UP the
+    // self-FK collecting that node's ancestor chain with a `level` counter (0 at the matched
+    // node, incrementing toward the root). Rows come back root-first (ORDER BY level DESC) so the
+    // UI can reveal/expand the path top-down. Each row carries `_has_children` exactly like
+    // BuildTreeLevelQuery so the matched path renders identically to a lazily-loaded level.
+    //
+    // `searchParameters` MUST already hold the @pN parameters referenced by searchConditionSql
+    // (the caller seeds them via DatasetFilterWhereBuilder); the owner scoping parameter
+    // (@p_owner_id) is added here when scoped, then the same instance is returned. fkColumnName
+    // is produced by BuildFkColumnName. Caller guarantees searchConditionSql is non-empty (an
+    // empty predicate would make search_target pick an arbitrary row).
+    internal static (string Sql, DynamicParameters Parameters) BuildTreeSearchPathQuery(
+        SafeIdentifier tableName,
+        IReadOnlyList<ColumnDefinition> userColumns,
+        string fkColumnName,
+        string searchConditionSql,
+        DynamicParameters searchParameters,
+        // Auth filter: when both set, the matched node AND every ancestor must be owned by the
+        // user (ownerColumn = ownerId) — you can't reveal a path through nodes you don't own.
+        string? ownerColumn = null,
+        Guid? ownerId = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(userColumns);
+        ArgumentException.ThrowIfNullOrEmpty(fkColumnName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(searchConditionSql);
+        ArgumentNullException.ThrowIfNull(searchParameters);
+
+        var t = tableName.Value;
+        var scoped = !string.IsNullOrEmpty(ownerColumn) && ownerId.HasValue;
+        var targetOwner = scoped ? $" AND \"{ownerColumn}\" = @p_owner_id" : string.Empty;
+        var anchorOwner = scoped ? $" AND \"{ownerColumn}\" = @p_owner_id" : string.Empty;
+        var recurseOwner = scoped ? $" AND l.\"{ownerColumn}\" = @p_owner_id" : string.Empty;
+
+        var anchorCols = new StringBuilder();
+        AppendTreeSearchColumns(anchorCols, userColumns, fkColumnName, alias: null);
+        var recurseCols = new StringBuilder();
+        AppendTreeSearchColumns(recurseCols, userColumns, fkColumnName, alias: "l");
+
+        var sql = string.Create(CultureInfo.InvariantCulture, $"""
+            WITH RECURSIVE search_target AS (
+                SELECT "id" FROM "{t}"
+                WHERE ({searchConditionSql}) AND "is_deleted" = false{targetOwner}
+                LIMIT 1
+            ),
+            ancestors AS (
+                SELECT {anchorCols}, 0 AS level
+                FROM "{t}"
+                WHERE "id" = (SELECT "id" FROM search_target) AND "is_deleted" = false{anchorOwner}
+                UNION ALL
+                SELECT {recurseCols}, a.level + 1
+                FROM "{t}" l
+                INNER JOIN ancestors a ON l."id" = a."{fkColumnName}"
+                WHERE l."is_deleted" = false{recurseOwner}
+            )
+            SELECT a.*, EXISTS(SELECT 1 FROM "{t}" c WHERE c."{fkColumnName}" = a."id" AND c."is_deleted" = false) AS "_has_children"
+            FROM ancestors a
+            ORDER BY a."level" DESC
+            """);
+
+        if (scoped) searchParameters.Add("p_owner_id", ownerId!.Value);
+        return (sql, searchParameters);
+    }
+
+    // Emits the entire-tree-search projection column list: system columns (in select order) +
+    // user columns + the self-FK column, each optionally prefixed with a table alias. Mirrors
+    // AppendSelectColumns' system+user ordering, but additionally projects the self-FK — the
+    // recursive member joins the parent row on a."<fk>", so the column must travel in the CTE.
+    private static void AppendTreeSearchColumns(
+        StringBuilder sb, IReadOnlyList<ColumnDefinition> userColumns, string fkColumnName, string? alias)
+    {
+        var prefix = string.IsNullOrEmpty(alias) ? string.Empty : alias + ".";
+        var first = true;
+        foreach (var sys in SystemColumnsInSelectOrder)
+        {
+            if (!first) sb.Append(", ");
+            sb.Append(CultureInfo.InvariantCulture, $"{prefix}\"{sys}\"");
+            first = false;
+        }
+        foreach (var col in userColumns)
+        {
+            sb.Append(", ");
+            sb.Append(CultureInfo.InvariantCulture, $"{prefix}\"{col.ColumnName}\"");
+        }
+        sb.Append(", ");
+        sb.Append(CultureInfo.InvariantCulture, $"{prefix}\"{fkColumnName}\"");
+    }
+
     // Appends an OR of substring (ILIKE) predicates across every user column (cast to
     // text so numeric/temporal/uuid columns are searchable too), joined with AND onto the
     // existing WHERE. No-op when search is blank or the node template has no user columns.

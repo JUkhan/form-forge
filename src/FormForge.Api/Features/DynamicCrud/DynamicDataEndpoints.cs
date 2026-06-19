@@ -105,6 +105,19 @@ internal static class DynamicDataEndpoints
              .Produces<ProblemDetails>(StatusCodes.Status422UnprocessableEntity)
              .RequirePermission("read");
 
+        // TreeView "entire tree search" — POST /api/data/{designerId}/tree/search. Finds the
+        // first node matching the body's SEARCH_CONDITIONS (over the designer table or a dataset
+        // source) and returns that node's ancestor path, root-first, so the UI can reveal it. A
+        // POST (not GET) because the filter tree is a structured body, matching the dataset
+        // /rows endpoint. Read action; the literal "/tree/search" precedes "/{id:guid}".
+        group.MapPost("/tree/search", TreeSearchHandler)
+             .WithSummary("Search the whole TreeView tree; return the first match's ancestor path (recursive).")
+             .Produces<TreeSearchResult>(StatusCodes.Status200OK)
+             .Produces<ProblemDetails>(StatusCodes.Status403Forbidden)
+             .Produces<ProblemDetails>(StatusCodes.Status404NotFound)
+             .Produces<ProblemDetails>(StatusCodes.Status422UnprocessableEntity)
+             .RequirePermission("read");
+
         // TreeView — POST /api/data/{designerId}/tree. Creates a node, writing the
         // self-FK parent_<table>_id from the body's `parentId` (null → a root node).
         // Mutate mode hits the backend directly (no parent-form batching). The literal
@@ -656,6 +669,116 @@ internal static class DynamicDataEndpoints
                 .ToList();
 
             return Results.Ok(new TreeAncestorsResult(resultIds));
+        }
+        finally
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    // TreeView "entire tree search" — find the first node matching the body's SEARCH_CONDITIONS
+    // and return its ancestor path (root-first) so the UI can reveal/expand to it. Searches the
+    // dataset source when DatasetId + KeyField + ParentField are set, else the designer table.
+    internal static async Task<IResult> TreeSearchHandler(
+        string designerId,
+        [FromBody] TreeSearchRequest request,
+        HttpContext httpContext,
+        FormForgeDbContext db,
+        ISchemaRegistry schemaRegistry,
+        DbConnectionFactory connectionFactory,
+        DdlEmitter ddlEmitter,
+        IDatasetRowQueryService datasetRowQueryService,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(schemaRegistry);
+        ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(datasetRowQueryService);
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
+            return Problems.ValidationFailed("Invalid designer identifier.");
+
+        // Dataset-backed search: the path rows come from the dataset source (view or query).
+        if (Guid.TryParse(request.DatasetId, out var treeDatasetId)
+            && !string.IsNullOrWhiteSpace(request.KeyField)
+            && !string.IsNullOrWhiteSpace(request.ParentField))
+        {
+            var authUserId = Guid.TryParse(httpContext.User.FindFirst("userId")?.Value, out var duid)
+                ? duid : (Guid?)null;
+            var dsRequest = new DatasetTreeSearchRequest(
+                KeyColumn: request.KeyField!.Trim(),
+                ParentColumn: request.ParentField!.Trim(),
+                Filters: request.Filters,
+                AuthFilterColumn: NormalizeDatasetAuthColumn(request.AuthFilterColumn),
+                QueryParameters: request.QueryParameters);
+            var dResult = await datasetRowQueryService.GetTreeSearchPathAsync(
+                treeDatasetId, dsRequest, ct, authUserId).ConfigureAwait(false);
+            return dResult.Outcome switch
+            {
+                DatasetRowsOutcome.Success => Results.Ok(new TreeSearchResult(
+                    (dResult.Rows ?? Array.Empty<IDictionary<string, object?>>())
+                        .Select(row => new DynamicRecord(
+                            row.ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.Ordinal)))
+                        .ToList())),
+                DatasetRowsOutcome.NotFound => Problems.TableNotProvisioned(),
+                _ => Problems.ValidationFailed(dResult.ErrorDetail ?? "Invalid dataset tree search."),
+            };
+        }
+
+        // Provisioned-table search.
+        var boundVersion = await ResolveEffectiveVersionAsync(db, safeId!.Value, ct).ConfigureAwait(false);
+        if (boundVersion is null)
+            return Problems.TableNotProvisioned();
+
+        var entry = await GetOrPopulateEntryAsync(db, schemaRegistry, safeId!.Value, boundVersion.Value, ct)
+            .ConfigureAwait(false);
+        var ownerResult = ResolveTreeOwnerFilter(request.AuthFilterColumn, entry, httpContext, out var ownerColumn, out var ownerId);
+        if (ownerResult is not null) return ownerResult;
+
+        // Build SEARCH_CONDITIONS from the body's filter tree against the table's user columns,
+        // reusing DatasetFilterWhereBuilder (column allowlist + operator allowlist + typed values).
+        var columnTypes = entry.Columns.ToDictionary(
+            c => c.ColumnName, c => PgTypeToDataType(c.PgType), StringComparer.Ordinal);
+        var parameters = new DynamicParameters();
+        var where = DatasetFilterWhereBuilder.Build(request.Filters, columnTypes, parameters, authFilter: null);
+        if (!where.IsValid)
+            return Problems.ValidationFailed(where.Error ?? "Invalid search conditions.");
+        if (where.Where.Length == 0)
+            return Problems.ValidationFailed("Entire-tree search requires at least one search condition.");
+        // BuildTreeSearchPathQuery wants the bare predicate — strip the leading " WHERE ".
+        var searchConditionSql = where.Where[" WHERE ".Length..];
+
+        var fkColumnName = DynamicQueryBuilder.BuildFkColumnName(safeId!.Value);
+
+        var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // Self-heal the self-FK on demand (same as ListTreeNodesHandler) — without it the
+            // recursive walk's parent_<table>_id reference would be a 42703.
+            if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+            {
+                await ddlEmitter.EnsureSelfReferenceColumnAsync(safeId!.Value, ct).ConfigureAwait(false);
+                if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+                    return Problems.ValidationFailed(
+                        "This designer is not configured as a TreeView tree (no self-reference column).");
+            }
+
+            var (sql, finalParams) = DynamicQueryBuilder.BuildTreeSearchPathQuery(
+                safeId, entry.Columns, fkColumnName, searchConditionSql, parameters, ownerColumn, ownerId);
+
+            var rawRows = (await conn.QueryAsync(new CommandDefinition(
+                sql, finalParams, commandTimeout: 5, cancellationToken: ct)).ConfigureAwait(false))
+                .Cast<IDictionary<string, object>>()
+                .ToList();
+
+            var records = rawRows
+                .Select(row => new DynamicRecord(row.ToDictionary(
+                    kvp => kvp.Key, kvp => (object?)kvp.Value, StringComparer.Ordinal)))
+                .ToList();
+
+            return Results.Ok(new TreeSearchResult(records));
         }
         finally
         {
@@ -2162,6 +2285,35 @@ internal static class DynamicDataEndpoints
 
     // TreeView ancestor reveal — recursive ancestor ids of a node set (camelCase `ids`).
     internal sealed record TreeAncestorsResult(IReadOnlyList<string> Ids);
+
+    // TreeView "entire tree search" — POST body. `Filters` is the design-time SEARCH_CONDITIONS
+    // (the value side already bound to the user's search literal by the SPA, sent as the
+    // canonical FilterGroupDto). When DatasetId + KeyField + ParentField are set the search runs
+    // over the dataset source; otherwise over the provisioned designer table. AuthFilterColumn /
+    // QueryParameters mirror the other tree + dataset endpoints.
+    internal sealed record TreeSearchRequest(
+        FilterGroupDto? Filters = null,
+        string? AuthFilterColumn = null,
+        string? DatasetId = null,
+        string? KeyField = null,
+        string? ParentField = null,
+        string? QueryParameters = null);
+
+    // TreeView "entire tree search" — the matched node's ancestor path, root-first (camelCase
+    // `rows`). Each row carries `_has_children` like a lazily-loaded level.
+    internal sealed record TreeSearchResult(IReadOnlyList<DynamicRecord> Rows);
+
+    // ColumnDefinition.PgType is DDL-style (TEXT | NUMERIC | …); DatasetFilterWhereBuilder coerces
+    // values by information_schema data_type, so map across for the provisioned-table search.
+    private static string PgTypeToDataType(string pgType) => pgType switch
+    {
+        "NUMERIC" => "numeric",
+        "BOOLEAN" => "boolean",
+        "TIMESTAMPTZ" => "timestamp with time zone",
+        "UUID" => "uuid",
+        "JSONB" => "jsonb",
+        _ => "text",
+    };
 
     // Validates an optional TreeView auth-filter column and resolves the requesting user
     // id. Returns null on success (out params set when a filter is requested); otherwise an

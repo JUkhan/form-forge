@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronRight, ChevronsUpDown, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, ChevronsUpDown, Loader2, Pencil, Plus, Search, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getFieldKey, type DesignerElement } from '@/types/designer'
 import {
@@ -8,12 +8,15 @@ import {
   createTreeNode,
   listTreeDescendantIds,
   listTreeAncestorIds,
+  searchTree,
   type TreeNode,
   type TreeDatasetSource,
 } from '@/features/data-entry/treeApi'
+import { parseTreeSearchFilter, resolveTreeSearchFilter } from './treeSearchFilter'
 import { updateRecord } from '@/features/data-entry/updateRecordApi'
 import { deleteRecord } from '@/features/data-entry/deleteRecordApi'
 import { getRecord } from '@/features/data-entry/recordApi'
+import { fetchDatasetRows } from '@/features/datasets/datasetApi'
 import ElementRenderer, { type InteractiveFormProps } from './ElementRenderer'
 import RepeaterRowDrawer from './RepeaterRowDrawer'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -62,6 +65,27 @@ interface TreeSelection {
   // Records a node's display label as it's selected, so the dropdown trigger can show
   // names instead of a count. Captured from the row at toggle time (and seeded on edit).
   registerLabel: (id: string, label: string) => void
+}
+
+// Entire-tree search reveal state. Independent of selection (works in every mode): when a
+// whole-tree search matches, `ancestorIds` holds the matched node's ancestors (so each is
+// auto-expanded down the path) and `matchedId` is the matched node itself (highlighted +
+// scrolled into view).
+//
+// `pathChildByParent` maps each level's parent id (the root level under the '' key) to the
+// path node that level MUST contain. SearchableLevel injects it if its own (paginated) fetch
+// didn't return it, so the path is always visible no matter how deep/late in a page the
+// matched node lives — without it the auto-expand cascade can't start. Empty when no search.
+interface TreeReveal {
+  ancestorIds: Set<string>
+  matchedId: string | null
+  pathChildByParent: Map<string, TreeNode>
+}
+
+const EMPTY_REVEAL: TreeReveal = {
+  ancestorIds: new Set(),
+  matchedId: null,
+  pathChildByParent: new Map(),
 }
 
 // Per-node action capabilities, derived once from the TreeView properties.
@@ -268,27 +292,55 @@ function TreeViewInteractive({
     [p.isDropdownUi],
   )
 
-  // Seed the trigger labels for the value loaded on mount (edit). Only the
-  // provisioned-table tree can resolve a node by id; dataset-backed trees fall back to
-  // capturing labels as rows are selected. Capped at MAX_LABEL_DISPLAY since beyond that
-  // the trigger shows a count, not names.
+  // Seed the trigger labels for the value loaded on mount (edit). The provisioned-table tree
+  // resolves each node by id; a dataset-backed tree reads the dataset rows whose key is in the
+  // seed set (the label column is a dataset column, same as the displayed template field).
+  // Capped at MAX_LABEL_DISPLAY since beyond that the trigger shows a count, not names.
   useEffect(() => {
-    if (p.isDropdownUi !== true || selectionMode === 'none') return
-    if (labelKey === '' || datasetSource || rowDesignerId === '') return
+    if (p.isDropdownUi !== true || selectionMode === 'none' || labelKey === '') return
     const ids = Array.from(seedIds)
     if (ids.length === 0 || ids.length > MAX_LABEL_DISPLAY) return
     let cancelled = false
-    Promise.allSettled(ids.map((rid) => getRecord(rowDesignerId, rid))).then((results) => {
-      if (cancelled) return
-      const next: Record<string, string> = {}
-      results.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          const raw = (r.value as Record<string, unknown>)[labelKey]
-          if (raw != null && String(raw).trim() !== '') next[ids[i]] = String(raw).trim()
-        }
+    const apply = (next: Record<string, string>) => {
+      if (!cancelled && Object.keys(next).length > 0) setLabelById((prev) => ({ ...next, ...prev }))
+    }
+
+    if (datasetSource) {
+      // Read the seed rows from the dataset (key IN seedIds) and map keyField → label.
+      const filters = {
+        id: 'root',
+        kind: 'group',
+        combinator: 'AND',
+        items: [
+          { id: 'seed', kind: 'condition', tableName: '', columnName: datasetSource.keyField, operator: 'IN', value: ids },
+        ],
+      }
+      fetchDatasetRows(datasetSource.datasetId, { filters, pageSize: ids.length })
+        .then((page) => {
+          const next: Record<string, string> = {}
+          for (const row of page.data) {
+            const rec = row as Record<string, unknown>
+            const rid = rec[datasetSource.keyField]
+            const raw = rec[labelKey]
+            if (rid != null && raw != null && String(raw).trim() !== '') next[String(rid)] = String(raw).trim()
+          }
+          apply(next)
+        })
+        .catch(() => {
+          /* trigger labels are a best-effort hint; ignore failures */
+        })
+    } else if (rowDesignerId !== '') {
+      Promise.allSettled(ids.map((rid) => getRecord(rowDesignerId, rid))).then((results) => {
+        const next: Record<string, string> = {}
+        results.forEach((r, i) => {
+          if (r.status === 'fulfilled') {
+            const raw = (r.value as Record<string, unknown>)[labelKey]
+            if (raw != null && String(raw).trim() !== '') next[ids[i]] = String(raw).trim()
+          }
+        })
+        apply(next)
       })
-      if (Object.keys(next).length > 0) setLabelById((prev) => ({ ...next, ...prev }))
-    })
+    }
     return () => {
       cancelled = true
     }
@@ -355,6 +407,72 @@ function TreeViewInteractive({
   const notConfigured = rowDesignerId === ''
   const isDropdownUi = p.isDropdownUi === true
 
+  // ── Entire-tree search ─────────────────────────────────────────────────────────────
+  // Opt-in (p.enableEntireTreeSearch): replaces the per-level search with a single box that
+  // searches the WHOLE tree server-side and reveals the path to the first match. The
+  // design-time conditions supply the columns/operators; the box value is the literal.
+  const entireTreeSearch = p.enableEntireTreeSearch === true
+  const searchConditions = useMemo(
+    () => parseTreeSearchFilter(p.treeSearchConditions),
+    [p.treeSearchConditions],
+  )
+  const [treeSearchInput, setTreeSearchInput] = useState('')
+  const [treeSearch, setTreeSearch] = useState('')
+  const [reveal, setReveal] = useState<TreeReveal>(EMPTY_REVEAL)
+  const [searchMsg, setSearchMsg] = useState<string | null>(null)
+
+  // Debounce the search box → committed `treeSearch`.
+  useEffect(() => {
+    const id = window.setTimeout(() => setTreeSearch(treeSearchInput.trim()), 300)
+    return () => window.clearTimeout(id)
+  }, [treeSearchInput])
+
+  // Run the whole-tree search whenever the committed query changes. An empty query (or no
+  // resolvable conditions) needs no request: the reveal is gated off below via `activeReveal`,
+  // and the effect simply doesn't fetch — so it sets state only from async callbacks (the
+  // empty-state reset is derived, not an in-effect setState).
+  useEffect(() => {
+    if (!entireTreeSearch || notConfigured) return
+    const filters = treeSearch === '' ? null : resolveTreeSearchFilter(searchConditions, treeSearch)
+    if (filters === null) return
+    let cancelled = false
+    void searchTree(rowDesignerId, { filters, authFilterColumn, dataset: datasetSource })
+      .then((path) => {
+        if (cancelled) return
+        if (path.length === 0) {
+          setReveal(EMPTY_REVEAL)
+          setSearchMsg(t('designer.treeView.noMatches'))
+          return
+        }
+        const ids = path.map((n) => String(n.id))
+        // Map each level to its path node: the root level under '', then each node under
+        // its parent's id — so every level can inject its path child if paging hid it.
+        const pathChildByParent = new Map<string, TreeNode>()
+        pathChildByParent.set('', path[0])
+        for (let i = 1; i < path.length; i++) {
+          pathChildByParent.set(String(path[i - 1].id), path[i])
+        }
+        setReveal({
+          ancestorIds: new Set(ids.slice(0, -1)),
+          matchedId: ids[ids.length - 1],
+          pathChildByParent,
+        })
+        setSearchMsg(null)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setReveal(EMPTY_REVEAL)
+        setSearchMsg(errMessage(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [entireTreeSearch, notConfigured, treeSearch, searchConditions, rowDesignerId, authFilterColumn, datasetSource, t])
+
+  // Reveal applies only while a query is present — so clearing the box restores the normal
+  // lazy tree without an in-effect reset. Empty when search is off/blank.
+  const activeReveal = entireTreeSearch && treeSearch !== '' ? reveal : EMPTY_REVEAL
+
   // Shared inner content: error banner, the tree (or "not configured" notice), and the
   // root-level add button. Rendered inline (normal) or inside the dropdown popover.
   const treeBody = (
@@ -362,6 +480,41 @@ function TreeViewInteractive({
       {banner && (
         <div className="border-b border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
           {banner}
+        </div>
+      )}
+      {entireTreeSearch && !notConfigured && (
+        <div className="flex flex-col gap-1 border-b border-border px-3 py-2">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <input
+              type="text"
+              value={treeSearchInput}
+              onChange={(e) => setTreeSearchInput(e.target.value)}
+              placeholder={t('designer.treeView.searchTreePlaceholder')}
+              className="h-9 w-full rounded-lg border border-field-border bg-field pl-9 pr-9 text-sm text-foreground placeholder:text-placeholder outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            />
+            {treeSearchInput !== '' && (
+              <button
+                type="button"
+                onClick={() => {
+                  // Clear immediately (skip the debounce) so the tree restores at once.
+                  setTreeSearchInput('')
+                  setTreeSearch('')
+                  setSearchMsg(null)
+                }}
+                aria-label={t('designer.treeView.clearSearch')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          {treeSearch !== '' && searchMsg && (
+            <span className="text-[10px] text-muted-foreground">{searchMsg}</span>
+          )}
         </div>
       )}
       {notConfigured ? (
@@ -377,6 +530,8 @@ function TreeViewInteractive({
           element={element}
           mode={mode}
           selection={selection}
+          reveal={activeReveal}
+          entireSearch={entireTreeSearch}
           pageSize={pageSize}
           authFilterColumn={authFilterColumn}
           datasetSource={datasetSource}
@@ -503,6 +658,8 @@ function SearchableLevel({
   element,
   mode,
   selection,
+  reveal,
+  entireSearch,
   pageSize,
   authFilterColumn,
   datasetSource,
@@ -516,6 +673,10 @@ function SearchableLevel({
   element: DesignerElement
   mode: TreeMode
   selection: TreeSelection
+  reveal: TreeReveal
+  // Entire-tree search active: hide this level's own search box (the single top-level box
+  // drives a whole-tree search instead — see the TreeView spec).
+  entireSearch: boolean
   pageSize: number
   authFilterColumn: string | undefined
   datasetSource: TreeDatasetSource | undefined
@@ -573,27 +734,54 @@ function SearchableLevel({
     void fetchPage(1, true)
   }, [fetchPage])
 
-  const showSearch = everHadNext || search !== ''
+  // Per-level search is the default; whole-tree search replaces it (so hide this box then).
+  const showSearch = !entireSearch && (everHadNext || search !== '')
+
+  // Whole-tree search: make sure this level shows its path node even if the matched node's
+  // ancestor wasn't on the fetched page — prepend it when missing. Keyed by this level's
+  // parent (the root level under ''). This is what lets the auto-expand cascade reach a deep
+  // match; without it the reveal silently does nothing when the path falls outside page 1.
+  const pathChild = reveal.pathChildByParent.get(parentId ?? '')
+  const displayRows = useMemo(() => {
+    if (!pathChild || rows.some((r) => String(r.id) === String(pathChild.id))) return rows
+    return [pathChild, ...rows]
+  }, [rows, pathChild])
 
   return (
     <div className="flex flex-col">
       {showSearch && (
-        <div
-          className="flex items-center gap-1.5 px-3 py-1.5"
-          style={{ paddingLeft: `${12 + depth * 18}px` }}
-        >
-          <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-          <input
-            type="text"
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder={t('designer.treeView.searchPlaceholder')}
-            className="h-7 w-full rounded border border-field-border bg-field px-2 text-xs text-foreground placeholder:text-placeholder"
-          />
+        <div className="px-3 py-1.5" style={{ paddingLeft: `${12 + depth * 18}px` }}>
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder={t('designer.treeView.searchPlaceholder')}
+              className="h-9 w-full rounded-lg border border-field-border bg-field pl-9 pr-9 text-sm text-foreground placeholder:text-placeholder outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            />
+            {searchInput !== '' && (
+              <button
+                type="button"
+                onClick={() => {
+                  // Clear immediately (skip the debounce) so the level reloads at once.
+                  setSearchInput('')
+                  setSearch('')
+                }}
+                aria-label={t('designer.treeView.clearSearch')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
         </div>
       )}
       <ul>
-        {rows.length === 0 && !loading ? (
+        {displayRows.length === 0 && !loading ? (
           <li
             className="px-3 py-2 text-xs text-muted-foreground"
             style={{ paddingLeft: `${12 + depth * 18}px` }}
@@ -601,7 +789,7 @@ function SearchableLevel({
             {search !== '' ? t('designer.treeView.noMatches') : t('designer.renderer.noRowsYet')}
           </li>
         ) : (
-          rows.map((node) => (
+          displayRows.map((node) => (
             <TreeNodeRow
               key={String(node.id)}
               node={node}
@@ -611,6 +799,8 @@ function SearchableLevel({
               element={element}
               mode={mode}
               selection={selection}
+              reveal={reveal}
+              entireSearch={entireSearch}
               pageSize={pageSize}
               authFilterColumn={authFilterColumn}
               datasetSource={datasetSource}
@@ -645,6 +835,8 @@ function TreeNodeRow({
   element,
   mode,
   selection,
+  reveal,
+  entireSearch,
   pageSize,
   authFilterColumn,
   datasetSource,
@@ -658,6 +850,8 @@ function TreeNodeRow({
   element: DesignerElement
   mode: TreeMode
   selection: TreeSelection
+  reveal: TreeReveal
+  entireSearch: boolean
   pageSize: number
   authFilterColumn: string | undefined
   datasetSource: TreeDatasetSource | undefined
@@ -707,11 +901,22 @@ function TreeNodeRow({
   // This node sits on the path to a (seed) selection but isn't itself selected.
   const hasSelectedDescendant = !isSelected && selection.ancestorIds.has(id)
 
-  // Single-select reveal: default-open the path to the seeded selection. As the ancestor
-  // set resolves (async) this flips true and cascades — each revealed ancestor renders its
-  // children, whose rows in turn default-open down to the selected node. A user override
-  // (collapse/expand) wins over the default.
-  const expanded = userExpanded ?? (selection.autoExpand && hasSelectedDescendant)
+  // Entire-tree search reveal: this node is an ancestor of the matched node (so open the
+  // path to it), or it IS the match (highlight + scroll into view). Independent of selection.
+  const onRevealPath = reveal.ancestorIds.has(id)
+  const isMatched = reveal.matchedId === id
+  const rowRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (isMatched && rowRef.current) {
+      rowRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
+  }, [isMatched])
+
+  // Reveal: default-open the path to the seeded selection (single-select) OR to a whole-tree
+  // search match. As the reveal set resolves (async) this flips true and cascades — each
+  // revealed ancestor renders its children, whose rows default-open down to the target node.
+  // A user override (collapse/expand) wins over the default.
+  const expanded = userExpanded ?? ((selection.autoExpand && hasSelectedDescendant) || onRevealPath)
 
   // "All select": checking a node selects its whole subtree. Descendant ids are
   // fetched recursively (covers un-expanded branches); otherwise toggle just this node.
@@ -730,9 +935,11 @@ function TreeNodeRow({
   return (
     <li>
       <div
+        ref={rowRef}
         className={cn(
           'flex items-center gap-2 px-3 py-1.5 hover:bg-overlay-hover',
           isSelected && 'bg-primary/10',
+          isMatched && 'bg-accent/20 ring-1 ring-inset ring-ring',
         )}
         style={{ paddingLeft: `${12 + depth * 18}px` }}
       >
@@ -835,6 +1042,8 @@ function TreeNodeRow({
           element={element}
           mode={mode}
           selection={selection}
+          reveal={reveal}
+          entireSearch={entireSearch}
           pageSize={pageSize}
           authFilterColumn={authFilterColumn}
           datasetSource={datasetSource}

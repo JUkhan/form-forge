@@ -53,6 +53,14 @@ import {
   type DatasetFilterGroup,
 } from './datasetFilter'
 import {
+  addCondition as addTreeSearchCondition,
+  parseTreeSearchFilter,
+  removeCondition as removeTreeSearchCondition,
+  setCombinator as setTreeSearchCombinator,
+  updateCondition as updateTreeSearchCondition,
+  type TreeSearchGroup,
+} from './treeSearchFilter'
+import {
   addQueryParamBinding,
   parseQueryParamBindings,
   removeQueryParamBinding,
@@ -1394,6 +1402,200 @@ function DatasetFilterConditionsField({
   )
 }
 
+// TreeView entire-tree-search conditions editor — the value-less sibling of
+// DatasetFilterConditionsField above. Same `<column> <operator>` rows joined by one AND/OR,
+// but with NO right-operand fieldKey combobox: every condition is compared at runtime against
+// the single literal typed into the TreeView's search box. Left operands are the designer's
+// row-template fieldKeys, or the dataset columns when a dataset source is configured.
+function TreeSearchConditionsField({
+  group,
+  columns,
+  columnsReady,
+  columnsLoading,
+  onChange,
+}: {
+  group: TreeSearchGroup
+  columns: string[]
+  columnsReady: boolean
+  columnsLoading: boolean
+  onChange: (next: TreeSearchGroup) => void
+}) {
+  const { t } = useTranslation()
+
+  const columnPlaceholder = !columnsReady
+    ? t('designer.inspector.placeholders.fieldNameNoSource')
+    : columnsLoading
+      ? t('designer.inspector.placeholders.componentsLoading')
+      : columns.length === 0
+        ? t('designer.inspector.placeholders.datasetColumnsEmpty')
+        : t('designer.inspector.placeholders.fieldNameSelect')
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {t('designer.inspector.fields.filterConditions')}
+        </span>
+        <Select
+          value={group.combinator}
+          onValueChange={(v) => onChange(setTreeSearchCombinator(group, v === 'OR' ? 'OR' : 'AND'))}
+        >
+          <SelectTrigger className="h-6 w-20 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="AND">{t('designer.inspector.options.combinatorAnd')}</SelectItem>
+            <SelectItem value="OR">{t('designer.inspector.options.combinatorOr')}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {group.items.length === 0 && (
+        <p className="text-[10px] text-muted-foreground">
+          {t('designer.inspector.help.treeSearchNoConditions')}
+        </p>
+      )}
+
+      {group.items.map((cond) => {
+        const colOptions: ComboboxOption[] = [
+          ...(cond.columnName !== '' && !columns.includes(cond.columnName)
+            ? [{ value: cond.columnName, label: `${cond.columnName} (not available)` }]
+            : []),
+          ...columns.map((c) => ({ value: c, label: c })),
+        ]
+        return (
+          <div key={cond.id} className="flex flex-col gap-1 rounded border border-border bg-card p-1.5">
+            <Combobox
+              value={cond.columnName}
+              onValueChange={(v) => onChange(updateTreeSearchCondition(group, cond.id, { columnName: v }))}
+              options={colOptions}
+              placeholder={columnPlaceholder}
+              searchPlaceholder={t('designer.inspector.placeholders.fieldNameSelect')}
+              disabled={!columnsReady}
+              className={TRIGGER_COMPACT_CLASS}
+              aria-label={t('designer.inspector.fields.filterColumn')}
+            />
+            <div className="flex items-center gap-1">
+              <Select
+                value={cond.operator}
+                onValueChange={(v) =>
+                  onChange(updateTreeSearchCondition(group, cond.id, { operator: v as TreeSearchGroup['items'][number]['operator'] }))
+                }
+              >
+                <SelectTrigger className="h-7 w-28 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {FILTER_OPERATORS.map((op) => (
+                    <SelectItem key={op} value={op}>
+                      {op}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <button
+                type="button"
+                onClick={() => onChange(removeTreeSearchCondition(group, cond.id))}
+                className="ml-auto rounded px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                aria-label={t('designer.inspector.removeCondition')}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )
+      })}
+
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-7 text-xs"
+        onClick={() => onChange(addTreeSearchCondition(group))}
+      >
+        {t('designer.inspector.addCondition')}
+      </Button>
+    </div>
+  )
+}
+
+// TreeView "Enable entire tree search" — the toggle + (when on) the value-less conditions
+// editor. Resolves the left-operand list from whichever source the tree uses: the dataset's
+// columns when a dataset source is configured (datasetId set), else the row-template
+// designer's field keys. All hooks live here so the parent switch can mount it unconditionally.
+function TreeViewEntireSearchFields({
+  id,
+  enabled,
+  conditions,
+  rowDesignerId,
+  rowVersion,
+  datasetId,
+  updateProp,
+}: {
+  id: string
+  enabled: boolean
+  conditions: unknown
+  rowDesignerId: string
+  rowVersion: number | undefined
+  datasetId: string
+  updateProp: UpdateProp
+}) {
+  const { t } = useTranslation()
+  const useDataset = datasetId !== ''
+
+  // Designer source: the row-template designer's field keys (same data as the auth-filter select).
+  const schemaQuery = useQuery({
+    queryKey: ['designer', 'schema', rowDesignerId, rowVersion ?? 'latest'],
+    queryFn: () => designerApi.getSchema(rowDesignerId, rowVersion),
+    enabled: enabled && !useDataset && rowDesignerId !== '',
+    staleTime: 60_000,
+  })
+  // Dataset source: the dataset VIEW/query columns.
+  const columnsQuery = useQuery({
+    queryKey: ['dataset', 'columns', datasetId],
+    queryFn: () => getDatasetColumns(datasetId),
+    enabled: enabled && useDataset,
+    staleTime: 60_000,
+  })
+
+  const columns = useDataset
+    ? (columnsQuery.data?.columns ?? [])
+    : extractRowFormFieldKeys(schemaQuery.data?.rootElement ?? null)
+  const hasSource = useDataset ? datasetId !== '' : rowDesignerId !== ''
+  const loading = useDataset ? columnsQuery.isLoading : schemaQuery.isLoading
+  const hasError = useDataset ? columnsQuery.isError : schemaQuery.isError
+  const columnsReady = hasSource && !loading && !hasError
+
+  const group = useMemo(() => parseTreeSearchFilter(conditions), [conditions])
+
+  return (
+    <>
+      <BoolField
+        label={t('designer.inspector.fields.enableEntireTreeSearch')}
+        checked={enabled}
+        onChange={(v) => updateProp(id, 'enableEntireTreeSearch', v)}
+      />
+      <p className="text-[10px] text-muted-foreground">
+        {t('designer.inspector.help.treeViewEntireSearch')}
+      </p>
+      {enabled &&
+        (hasSource ? (
+          <TreeSearchConditionsField
+            group={group}
+            columns={columns}
+            columnsReady={columnsReady}
+            columnsLoading={loading}
+            onChange={(next) => updateProp(id, 'treeSearchConditions', next)}
+          />
+        ) : (
+          <p className="text-[10px] text-destructive">
+            {t('designer.inspector.help.treeViewEntireSearchNoSource')}
+          </p>
+        ))}
+    </>
+  )
+}
+
 // Query parameter bindings — for a parameterized "query"-type datasource, each {_placeholder}
 // is mapped to a filter input's field key. Like the filter conditions UI but with NO operator
 // (a parameter is a value substitution, not a condition); the add button reads "Add Param".
@@ -2608,6 +2810,17 @@ function PropertyFields({
               {t('designer.inspector.help.treeViewPageSize')}
             </span>
           </Field>
+          {/* Entire-tree search (opt-in): replaces level-wise search with a single search box
+              that runs a recursive server-side search and reveals the matched node's path. */}
+          <TreeViewEntireSearchFields
+            id={id}
+            enabled={bool('enableEntireTreeSearch')}
+            conditions={element.properties.treeSearchConditions}
+            rowDesignerId={str('rowDesignerId')}
+            rowVersion={optNum('rowVersion')}
+            datasetId={str('optionsDatasetId')}
+            updateProp={updateProp}
+          />
           {/* Presentation-only toggle (applies in every mode): compact dropdown rendering. */}
           <BoolField
             label={t('designer.inspector.fields.isDropdownUi')}

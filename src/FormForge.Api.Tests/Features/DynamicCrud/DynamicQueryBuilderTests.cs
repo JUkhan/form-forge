@@ -1,3 +1,4 @@
+using Dapper;
 using FormForge.Api.Features.Designer;
 using FormForge.Api.Features.DynamicCrud;
 using FormForge.Api.Features.SchemaRegistry;
@@ -1307,6 +1308,102 @@ public class DynamicQueryBuilderTests
         // …and the recursive term filters walked-up rows by owner too.
         Assert.Contains("p.\"owner_id\" = @p_owner_id", sql, StringComparison.Ordinal);
         Assert.Equal(owner, parameters.Get<Guid>("p_owner_id"));
+    }
+
+    // ---- TreeView: BuildTreeSearchPathQuery (entire-tree search) --------------
+
+    [Fact]
+    public void BuildTreeSearchPathQuery_BuildsRecursiveAncestorPath_WithSearchTargetAndLevelOrder()
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("p0", "%foo%");
+        var (sql, _) = DynamicQueryBuilder.BuildTreeSearchPathQuery(
+            MakeTable("org_unit"),
+            [new ColumnDefinition("name", "TEXT", "TextInput", false)],
+            fkColumnName: "parent_org_unit_id",
+            searchConditionSql: "\"name\"::text ILIKE @p0",
+            searchParameters: parameters);
+
+        // search_target picks the first matching node; the recursive CTE walks up to its root.
+        Assert.Contains("WITH RECURSIVE search_target AS", sql, StringComparison.Ordinal);
+        Assert.Contains("ancestors AS", sql, StringComparison.Ordinal);
+        // The caller-built SEARCH_CONDITIONS predicate is embedded verbatim.
+        Assert.Contains("\"name\"::text ILIKE @p0", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        // Anchor is the matched node at level 0; recursion walks UP via the self-FK.
+        Assert.Contains("0 AS level", sql, StringComparison.Ordinal);
+        Assert.Contains("a.level + 1", sql, StringComparison.Ordinal);
+        Assert.Contains("INNER JOIN ancestors a ON l.\"id\" = a.\"parent_org_unit_id\"", sql, StringComparison.Ordinal);
+        // Each row carries the derived child flag, and rows come back root-first.
+        Assert.Contains("AS \"_has_children\"", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY a.\"level\" DESC", sql, StringComparison.Ordinal);
+        // Live rows only — search target, anchor, recursive term, and the _has_children probe.
+        Assert.Equal(4, CountOccurrences(sql, "\"is_deleted\" = false"));
+    }
+
+    [Fact]
+    public void BuildTreeSearchPathQuery_ProjectsSelfFk_SoTheWalkUpCanJoinOnIt()
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("p0", "x");
+        var (sql, _) = DynamicQueryBuilder.BuildTreeSearchPathQuery(
+            MakeTable("org_unit"),
+            [new ColumnDefinition("name", "TEXT", "TextInput", false)],
+            "parent_org_unit_id", "\"name\" = @p0", parameters);
+
+        // The self-FK must be in the CTE projection (unqualified anchor + l.-qualified recursive)
+        // so the recursive member can read a."parent_org_unit_id".
+        Assert.Contains("\"parent_org_unit_id\", 0 AS level", sql, StringComparison.Ordinal);
+        Assert.Contains("l.\"parent_org_unit_id\", a.level + 1", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildTreeSearchPathQuery_PreservesSeededSearchParameters()
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("p0", "%term%");
+        var (_, returned) = DynamicQueryBuilder.BuildTreeSearchPathQuery(
+            MakeTable("org_unit"),
+            [new ColumnDefinition("name", "TEXT", "TextInput", false)],
+            "parent_org_unit_id", "\"name\"::text ILIKE @p0", parameters);
+
+        // The same instance is returned with the caller's search params intact.
+        Assert.Same(parameters, returned);
+        Assert.Equal("%term%", returned.Get<string>("p0"));
+    }
+
+    [Fact]
+    public void BuildTreeSearchPathQuery_WithOwnerFilter_ScopesTargetAnchorAndRecursion()
+    {
+        var owner = Guid.NewGuid();
+        var parameters = new DynamicParameters();
+        parameters.Add("p0", "x");
+        var (sql, returned) = DynamicQueryBuilder.BuildTreeSearchPathQuery(
+            MakeTable("org_unit"),
+            [new ColumnDefinition("name", "TEXT", "TextInput", false)],
+            "parent_org_unit_id", "\"name\" = @p0", parameters,
+            ownerColumn: "owner_id", ownerId: owner);
+
+        // Unqualified scope for search_target + anchor (single relation), l. for the recursive
+        // term — you can't reveal a path through nodes you don't own. (The _has_children probe
+        // mirrors BuildTreeLevelQuery, which is intentionally not owner-scoped.)
+        Assert.Contains("\"owner_id\" = @p_owner_id", sql, StringComparison.Ordinal);
+        Assert.Contains("l.\"owner_id\" = @p_owner_id", sql, StringComparison.Ordinal);
+        Assert.Equal(owner, returned.Get<Guid>("p_owner_id"));
+    }
+
+    [Fact]
+    public void BuildTreeSearchPathQuery_WithoutOwnerFilter_HasNoOwnerPredicate()
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("p0", "x");
+        var (sql, returned) = DynamicQueryBuilder.BuildTreeSearchPathQuery(
+            MakeTable("org_unit"),
+            [new ColumnDefinition("name", "TEXT", "TextInput", false)],
+            "parent_org_unit_id", "\"name\" = @p0", parameters);
+
+        Assert.DoesNotContain("@p_owner_id", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("p_owner_id", returned.ParameterNames);
     }
 
     private static int CountOccurrences(string haystack, string needle)

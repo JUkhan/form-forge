@@ -96,6 +96,23 @@ internal sealed record DatasetTreeAncestorsResult(
     IReadOnlyList<string>? Ids = null,
     string? ErrorDetail = null);
 
+// Entire-tree search over a dataset-backed tree: find the FIRST row matching `Filters`
+// (the design-time SEARCH_CONDITIONS, value side bound to the user's search box), then walk
+// UP the self-reference (ParentColumn → KeyColumn) collecting that row's ancestor chain.
+// AuthFilterColumn scopes the match AND every ancestor to the requesting user.
+internal sealed record DatasetTreeSearchRequest(
+    string KeyColumn,
+    string ParentColumn,
+    FilterGroupDto? Filters,
+    string? AuthFilterColumn = null,
+    string? QueryParameters = null);
+
+// The ancestor-path rows, root-first (level DESC), each carrying a derived `_has_children`.
+internal sealed record DatasetTreeSearchResult(
+    DatasetRowsOutcome Outcome,
+    IReadOnlyList<IDictionary<string, object?>>? Rows = null,
+    string? ErrorDetail = null);
+
 internal interface IDatasetRowQueryService
 {
     // authUserId (optional) is the requesting user's id; combined with the request's
@@ -125,6 +142,11 @@ internal interface IDatasetRowQueryService
     Task<DatasetTreeAncestorsResult> GetTreeAncestorsAsync(
         Guid datasetId, string keyColumn, string parentColumn, IReadOnlyList<string> ids,
         string? authFilterColumn, CancellationToken ct, Guid? authUserId = null);
+
+    // The full row of the first node matching the search conditions and of each of its
+    // ancestors (recursive walk up), root-first, for the "entire tree search" reveal.
+    Task<DatasetTreeSearchResult> GetTreeSearchPathAsync(
+        Guid datasetId, DatasetTreeSearchRequest request, CancellationToken ct, Guid? authUserId = null);
 }
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812",
@@ -606,6 +628,95 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
                 .Where(s => s.Length > 0)
                 .ToList();
             return new DatasetTreeAncestorsResult(DatasetRowsOutcome.Success, resultIds);
+        }
+        finally
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    public async Task<DatasetTreeSearchResult> GetTreeSearchPathAsync(
+        Guid datasetId, DatasetTreeSearchRequest request, CancellationToken ct, Guid? authUserId = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var resolved = await DatasetSourceResolver.ResolveAsync(
+                conn, datasetId, request.QueryParameters, allowParameterized: true,
+                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            if (resolved.Outcome == DatasetSourceOutcome.NotFound)
+                return new DatasetTreeSearchResult(DatasetRowsOutcome.NotFound);
+            if (resolved.Outcome != DatasetSourceOutcome.Ok)
+                return new DatasetTreeSearchResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: resolved.Error);
+            var src = resolved.Source!;
+            var columnTypes = src.ColumnTypes;
+            if (!columnTypes.ContainsKey(request.KeyColumn))
+                return new DatasetTreeSearchResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown key column '{request.KeyColumn}'.");
+            if (!columnTypes.ContainsKey(request.ParentColumn))
+                return new DatasetTreeSearchResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown parent column '{request.ParentColumn}'.");
+
+            var authFilter = ResolveAuthFilter(request.AuthFilterColumn, authUserId);
+            if (authFilter is { } afc && !columnTypes.ContainsKey(afc.Column))
+                return new DatasetTreeSearchResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: $"Unknown auth filter column '{afc.Column}'.");
+
+            // SEARCH_CONDITIONS only — auth scope is applied uniformly to the search target AND
+            // the whole walk below (so a path can't be revealed through nodes the user can't see),
+            // so do NOT fold it into this WHERE.
+            var parameters = new DynamicParameters();
+            var where = DatasetFilterWhereBuilder.Build(request.Filters, columnTypes, parameters, authFilter: null);
+            if (!where.IsValid)
+                return new DatasetTreeSearchResult(DatasetRowsOutcome.InvalidRequest, ErrorDetail: where.Error);
+            if (where.Where.Length == 0)
+                return new DatasetTreeSearchResult(DatasetRowsOutcome.InvalidRequest,
+                    ErrorDetail: "Entire-tree search requires at least one search condition.");
+
+            var viewRef = src.Relation;
+            var kc = QuoteIdentifier(request.KeyColumn);
+            var pc = QuoteIdentifier(request.ParentColumn);
+
+            // Auth scope predicates: unqualified for the search target + anchor (single relation),
+            // `l.`-qualified for the recursive member, `c.`-qualified for the _has_children probe.
+            var authAnchor = string.Empty;
+            var authRec = string.Empty;
+            var authHc = string.Empty;
+            if (authFilter is { } af)
+            {
+                object authVal = columnTypes.TryGetValue(af.Column, out var at) && at == "uuid"
+                    ? af.Value
+                    : af.Value.ToString();
+                parameters.Add("p_auth", authVal);
+                var ac = QuoteIdentifier(af.Column);
+                authAnchor = $" AND {ac} = @p_auth";
+                authRec = $" AND l.{ac} = @p_auth";
+                authHc = $" AND c.{ac} = @p_auth";
+            }
+
+            // search_target = first matching row; ancestors = walk UP (l.key = a.parent) with a
+            // level counter (0 at the match, +1 toward the root). For a query-type source the
+            // dataset's own CTE is composed into this WITH RECURSIVE list (RECURSIVE may precede
+            // a non-recursive CTE without issue), exactly as GetTreeAncestorsAsync does.
+            var sql =
+                "WITH RECURSIVE " +
+                (src.CteDefinition.Length > 0 ? src.CteDefinition + ", " : string.Empty) +
+                "search_target AS (" +
+                $"SELECT {kc} AS k FROM {viewRef}{where.Where}{authAnchor} LIMIT 1" +
+                "), ancestors AS (" +
+                $"SELECT *, 0 AS level FROM {viewRef} " +
+                $"WHERE {kc} = (SELECT k FROM search_target){authAnchor} " +
+                "UNION ALL " +
+                $"SELECT l.*, a.level + 1 FROM {viewRef} l " +
+                $"INNER JOIN ancestors a ON l.{kc} = a.{pc}{authRec}" +
+                ") " +
+                $"SELECT a.*, EXISTS(SELECT 1 FROM {viewRef} c WHERE c.{pc} = a.{kc}{authHc}) AS _has_children " +
+                "FROM ancestors a ORDER BY a.level DESC";
+
+            var rows = await QueryRowsAsync(conn, sql, parameters, src, CommandTimeoutSeconds, ct).ConfigureAwait(false);
+            return new DatasetTreeSearchResult(DatasetRowsOutcome.Success, rows);
         }
         finally
         {

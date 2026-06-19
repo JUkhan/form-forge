@@ -81,6 +81,21 @@ export interface DesignerElementProperties {
   optionsDatasetId?: string
   datasetKeyField?: string
   datasetParentField?: string
+  // Entire-tree search (opt-in). Level-wise search is the default; when
+  // `enableEntireTreeSearch` is on it is replaced by a single search box that runs a
+  // recursive server-side search across the WHOLE tree and reveals the ancestor path of
+  // the first matching node. `treeSearchConditions` is the design-time filter that builds
+  // the SEARCH_CONDITIONS predicate: a flat group of `<column> <operator>` rows joined by
+  // one AND/OR, where the value side of every condition is supplied at runtime by the
+  // single search box (so, unlike the DatasetComponent filter, there is no bound
+  // `valueFieldKey`). Left operands are the designer's row-template fieldKeys, or the
+  // dataset columns when a dataset source is configured. Persisted as a plain object;
+  // parsed defensively by the inspector (see web/src/components/designer/treeSearchFilter).
+  enableEntireTreeSearch?: boolean
+  treeSearchConditions?: {
+    combinator: 'AND' | 'OR'
+    items: { id: string; columnName: string; operator: string }[]
+  }
   // Allow arbitrary properties
   [key: string]: unknown
 }

@@ -69,6 +69,53 @@ export async function listTreeNodes(
   return res
 }
 
+export interface SearchTreeParams {
+  // Already-resolved filter tree (a ResolvedFilterGroup from resolveTreeSearchFilter, or null
+  // when the search box is empty). Kept as `unknown` so the designer's treeSearchFilter resolver
+  // stays the single source of the shape — mirrors fetchDatasetRows.
+  filters: unknown
+  // Optional per-component auth filter — scopes the match + the whole ancestor walk to the user.
+  authFilterColumn?: string
+  // When set, the search runs over the dataset source instead of the provisioned table.
+  dataset?: TreeDatasetSource
+  // Parameterized "query"-type dataset: the {_placeholder} values as a JSON object string.
+  queryParameters?: string
+}
+
+// POST /api/data/{designerId}/tree/search — entire-tree search. Returns the first matching
+// node's ancestor path, ROOT-FIRST (the matched node is last), each row carrying `_has_children`
+// like a lazily-loaded level, so the caller can reveal/expand straight down to the match. An
+// empty/absent filter short-circuits to [] without a round-trip (an empty search must not match).
+export async function searchTree(
+  designerId: string,
+  params: SearchTreeParams,
+): Promise<TreeNode[]> {
+  if (params.filters == null) return []
+  const body: Record<string, unknown> = { filters: params.filters }
+  if (params.authFilterColumn) body.authFilterColumn = params.authFilterColumn
+  if (params.dataset) {
+    body.datasetId = params.dataset.datasetId
+    body.keyField = params.dataset.keyField
+    body.parentField = params.dataset.parentField
+  }
+  if (params.queryParameters) body.queryParameters = params.queryParameters
+  const res = await httpClient.post<{ rows: TreeNode[] }>(
+    `/api/data/${encodeURIComponent(designerId)}/tree/search`,
+    body,
+  )
+  const rows = res.rows ?? []
+  // Dataset-backed rows expose the id as the chosen keyField column; map it to `id` so the
+  // path nodes expand/select by id exactly like the provisioned-table tree (see listTreeNodes).
+  const keyField = params.dataset?.keyField
+  if (keyField) {
+    for (const row of rows) {
+      const rec = row as Record<string, unknown>
+      if (rec.id == null && rec[keyField] != null) rec.id = rec[keyField]
+    }
+  }
+  return rows
+}
+
 // GET /api/data/{designerId}/tree/descendants — ids of every live descendant of a node.
 // Used by the "All select" behavior to cascade selection across un-expanded branches.
 export function listTreeDescendantIds(

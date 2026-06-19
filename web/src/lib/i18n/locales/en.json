@@ -1078,6 +1078,7 @@
         "viewMode": "View mode",
         "selectAll": "All select",
         "isDropdownUi": "Is dropdown UI",
+        "enableEntireTreeSearch": "Enable entire tree search",
         "treeViewDataset": "Dataset source",
         "treeViewDatasetNone": "No dataset (use this component's table)",
         "treeViewDatasetKeyField": "Node id column",
@@ -1198,7 +1199,10 @@
         "treeViewViewMode": "Read-only browse. Disables add/edit/delete AND selection — users can only expand and search the tree.",
         "treeViewSelectAll": "Checking a node also selects its entire subtree (all descendants).",
         "treeViewDropdownUi": "Render the tree inside a compact dropdown that opens on click — useful in tight layouts.",
-        "treeViewAuthFilterColumn": "Optional. The node-template column that owns each record per user — stamped with the current user on the server and hidden on the form. Each user reads/edits only their own nodes scoped by this column."
+        "treeViewAuthFilterColumn": "Optional. The node-template column that owns each record per user — stamped with the current user on the server and hidden on the form. Each user reads/edits only their own nodes scoped by this column.",
+        "treeViewEntireSearch": "Replaces the per-level search with a single box that searches the whole tree and reveals the path to the first matching node. Define which columns the search compares against below.",
+        "treeViewEntireSearchNoSource": "Pick a node-template designer (or a dataset source) first — the search columns come from it.",
+        "treeSearchNoConditions": "No conditions yet — add one to choose which column the search box matches against."
       }
     },
     "singleRecord": {
@@ -1246,6 +1250,7 @@
       "collapse": "Collapse",
       "loadMore": "Load more",
       "searchPlaceholder": "Search…",
+      "searchTreePlaceholder": "Search the entire tree…",
       "noMatches": "No matching nodes",
       "confirmDelete": "Delete this node and all of its descendants?",
       "delete": "Delete",

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, ChevronsUpDown, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -8,9 +8,11 @@ import {
   createTreeNode,
   listTreeDescendantIds,
   listTreeAncestorIds,
+  searchTree,
   type TreeNode,
   type TreeDatasetSource,
 } from '@/features/data-entry/treeApi'
+import { parseTreeSearchFilter, resolveTreeSearchFilter } from './treeSearchFilter'
 import { updateRecord } from '@/features/data-entry/updateRecordApi'
 import { deleteRecord } from '@/features/data-entry/deleteRecordApi'
 import { getRecord } from '@/features/data-entry/recordApi'
@@ -63,6 +65,17 @@ interface TreeSelection {
   // names instead of a count. Captured from the row at toggle time (and seeded on edit).
   registerLabel: (id: string, label: string) => void
 }
+
+// Entire-tree search reveal state. Independent of selection (works in every mode): when a
+// whole-tree search matches, `ancestorIds` holds the matched node's ancestors (so each is
+// auto-expanded down the path) and `matchedId` is the matched node itself (highlighted +
+// scrolled into view). Both empty when no search is active.
+interface TreeReveal {
+  ancestorIds: Set<string>
+  matchedId: string | null
+}
+
+const EMPTY_REVEAL: TreeReveal = { ancestorIds: new Set(), matchedId: null }
 
 // Per-node action capabilities, derived once from the TreeView properties.
 interface TreeMode {
@@ -355,6 +368,61 @@ function TreeViewInteractive({
   const notConfigured = rowDesignerId === ''
   const isDropdownUi = p.isDropdownUi === true
 
+  // ── Entire-tree search ─────────────────────────────────────────────────────────────
+  // Opt-in (p.enableEntireTreeSearch): replaces the per-level search with a single box that
+  // searches the WHOLE tree server-side and reveals the path to the first match. The
+  // design-time conditions supply the columns/operators; the box value is the literal.
+  const entireTreeSearch = p.enableEntireTreeSearch === true
+  const searchConditions = useMemo(
+    () => parseTreeSearchFilter(p.treeSearchConditions),
+    [p.treeSearchConditions],
+  )
+  const [treeSearchInput, setTreeSearchInput] = useState('')
+  const [treeSearch, setTreeSearch] = useState('')
+  const [reveal, setReveal] = useState<TreeReveal>(EMPTY_REVEAL)
+  const [searchMsg, setSearchMsg] = useState<string | null>(null)
+
+  // Debounce the search box → committed `treeSearch`.
+  useEffect(() => {
+    const id = window.setTimeout(() => setTreeSearch(treeSearchInput.trim()), 300)
+    return () => window.clearTimeout(id)
+  }, [treeSearchInput])
+
+  // Run the whole-tree search whenever the committed query changes. An empty query (or no
+  // resolvable conditions) needs no request: the reveal is gated off below via `activeReveal`,
+  // and the effect simply doesn't fetch — so it sets state only from async callbacks (the
+  // empty-state reset is derived, not an in-effect setState).
+  useEffect(() => {
+    if (!entireTreeSearch || notConfigured) return
+    const filters = treeSearch === '' ? null : resolveTreeSearchFilter(searchConditions, treeSearch)
+    if (filters === null) return
+    let cancelled = false
+    void searchTree(rowDesignerId, { filters, authFilterColumn, dataset: datasetSource })
+      .then((path) => {
+        if (cancelled) return
+        if (path.length === 0) {
+          setReveal(EMPTY_REVEAL)
+          setSearchMsg(t('designer.treeView.noMatches'))
+          return
+        }
+        const ids = path.map((n) => String(n.id))
+        setReveal({ ancestorIds: new Set(ids.slice(0, -1)), matchedId: ids[ids.length - 1] })
+        setSearchMsg(null)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setReveal(EMPTY_REVEAL)
+        setSearchMsg(errMessage(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [entireTreeSearch, notConfigured, treeSearch, searchConditions, rowDesignerId, authFilterColumn, datasetSource, t])
+
+  // Reveal applies only while a query is present — so clearing the box restores the normal
+  // lazy tree without an in-effect reset. Empty when search is off/blank.
+  const activeReveal = entireTreeSearch && treeSearch !== '' ? reveal : EMPTY_REVEAL
+
   // Shared inner content: error banner, the tree (or "not configured" notice), and the
   // root-level add button. Rendered inline (normal) or inside the dropdown popover.
   const treeBody = (
@@ -362,6 +430,23 @@ function TreeViewInteractive({
       {banner && (
         <div className="border-b border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
           {banner}
+        </div>
+      )}
+      {entireTreeSearch && !notConfigured && (
+        <div className="flex flex-col gap-1 border-b border-border px-3 py-2">
+          <div className="flex items-center gap-1.5">
+            <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+            <input
+              type="text"
+              value={treeSearchInput}
+              onChange={(e) => setTreeSearchInput(e.target.value)}
+              placeholder={t('designer.treeView.searchTreePlaceholder')}
+              className="h-7 w-full rounded border border-field-border bg-field px-2 text-xs text-foreground placeholder:text-placeholder"
+            />
+          </div>
+          {treeSearch !== '' && searchMsg && (
+            <span className="text-[10px] text-muted-foreground">{searchMsg}</span>
+          )}
         </div>
       )}
       {notConfigured ? (
@@ -377,6 +462,8 @@ function TreeViewInteractive({
           element={element}
           mode={mode}
           selection={selection}
+          reveal={activeReveal}
+          entireSearch={entireTreeSearch}
           pageSize={pageSize}
           authFilterColumn={authFilterColumn}
           datasetSource={datasetSource}
@@ -503,6 +590,8 @@ function SearchableLevel({
   element,
   mode,
   selection,
+  reveal,
+  entireSearch,
   pageSize,
   authFilterColumn,
   datasetSource,
@@ -516,6 +605,10 @@ function SearchableLevel({
   element: DesignerElement
   mode: TreeMode
   selection: TreeSelection
+  reveal: TreeReveal
+  // Entire-tree search active: hide this level's own search box (the single top-level box
+  // drives a whole-tree search instead — see the TreeView spec).
+  entireSearch: boolean
   pageSize: number
   authFilterColumn: string | undefined
   datasetSource: TreeDatasetSource | undefined
@@ -573,7 +666,8 @@ function SearchableLevel({
     void fetchPage(1, true)
   }, [fetchPage])
 
-  const showSearch = everHadNext || search !== ''
+  // Per-level search is the default; whole-tree search replaces it (so hide this box then).
+  const showSearch = !entireSearch && (everHadNext || search !== '')
 
   return (
     <div className="flex flex-col">
@@ -611,6 +705,8 @@ function SearchableLevel({
               element={element}
               mode={mode}
               selection={selection}
+              reveal={reveal}
+              entireSearch={entireSearch}
               pageSize={pageSize}
               authFilterColumn={authFilterColumn}
               datasetSource={datasetSource}
@@ -645,6 +741,8 @@ function TreeNodeRow({
   element,
   mode,
   selection,
+  reveal,
+  entireSearch,
   pageSize,
   authFilterColumn,
   datasetSource,
@@ -658,6 +756,8 @@ function TreeNodeRow({
   element: DesignerElement
   mode: TreeMode
   selection: TreeSelection
+  reveal: TreeReveal
+  entireSearch: boolean
   pageSize: number
   authFilterColumn: string | undefined
   datasetSource: TreeDatasetSource | undefined
@@ -707,11 +807,22 @@ function TreeNodeRow({
   // This node sits on the path to a (seed) selection but isn't itself selected.
   const hasSelectedDescendant = !isSelected && selection.ancestorIds.has(id)
 
-  // Single-select reveal: default-open the path to the seeded selection. As the ancestor
-  // set resolves (async) this flips true and cascades — each revealed ancestor renders its
-  // children, whose rows in turn default-open down to the selected node. A user override
-  // (collapse/expand) wins over the default.
-  const expanded = userExpanded ?? (selection.autoExpand && hasSelectedDescendant)
+  // Entire-tree search reveal: this node is an ancestor of the matched node (so open the
+  // path to it), or it IS the match (highlight + scroll into view). Independent of selection.
+  const onRevealPath = reveal.ancestorIds.has(id)
+  const isMatched = reveal.matchedId === id
+  const rowRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (isMatched && rowRef.current) {
+      rowRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
+  }, [isMatched])
+
+  // Reveal: default-open the path to the seeded selection (single-select) OR to a whole-tree
+  // search match. As the reveal set resolves (async) this flips true and cascades — each
+  // revealed ancestor renders its children, whose rows default-open down to the target node.
+  // A user override (collapse/expand) wins over the default.
+  const expanded = userExpanded ?? ((selection.autoExpand && hasSelectedDescendant) || onRevealPath)
 
   // "All select": checking a node selects its whole subtree. Descendant ids are
   // fetched recursively (covers un-expanded branches); otherwise toggle just this node.
@@ -730,9 +841,11 @@ function TreeNodeRow({
   return (
     <li>
       <div
+        ref={rowRef}
         className={cn(
           'flex items-center gap-2 px-3 py-1.5 hover:bg-overlay-hover',
           isSelected && 'bg-primary/10',
+          isMatched && 'bg-accent/20 ring-1 ring-inset ring-ring',
         )}
         style={{ paddingLeft: `${12 + depth * 18}px` }}
       >
@@ -835,6 +948,8 @@ function TreeNodeRow({
           element={element}
           mode={mode}
           selection={selection}
+          reveal={reveal}
+          entireSearch={entireSearch}
           pageSize={pageSize}
           authFilterColumn={authFilterColumn}
           datasetSource={datasetSource}

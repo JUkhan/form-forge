@@ -161,3 +161,25 @@ The PRD defers backup strategy to the operational runbook. Recommendations for t
 - MinIO: use MinIO's built-in replication or external sync to a backup bucket.
 - Aspire / Docker Compose: document volume mount paths for persistent data.
 - Test restore quarterly; document RTO/RPO targets.
+
+---
+
+## Options Considered: Multi-Tenant Isolation Model
+
+*Added 2026-09-08 (`sprint-change-proposal-2026-09-08.md`), evaluated against the actual implementation, not in the abstract — full analysis in the proposal §2.3.*
+
+**Shared tables + `tenant_id` column (rejected):**
+- Simpler for the static EF-managed tables (`users`, `roles`, `menus`) — one migration adds a column.
+- Requires a correct `tenant_id` predicate in every one of the ~30+ dynamic SQL-assembly call sites in the Generic CRUD service, plus every Dataset/Query-Builder SQL generation path — any one omission is a silent cross-tenant read/write.
+- Provides **no defense** against a Custom Query Mode author (FR-60, a supported, documented feature) simply omitting the filter from their own hand-written SQL — the isolation is a convention, not a guarantee.
+
+**Schema-per-tenant (chosen):**
+- The table *name* validation (`SafeIdentifier`, FR-23/AD-3) is unchanged; only the schema qualifier changes at a small, centralized set of call sites (`DdlEmitter`, `DynamicQueryBuilder`, `DatasetSqlGenerator`).
+- PostgreSQL enforces isolation via schema/role grants rather than relying on every hand-written and user-authored query remembering a filter — this closes the Dataset Custom-SQL leak vector structurally.
+- Cost: per-request schema/connection routing, a migration fan-out across N tenant schemas at startup, and a tenant-provisioning service that didn't exist before (Epic T).
+- Deciding factor: the amount of dynamic and user-authored SQL already in this codebase (Repeater tree queries, Dataset Custom Query, Query Builder) made the "never forget a predicate" risk of the `tenant_id` approach unacceptable for a security boundary.
+
+**Tenant identification — JWT claim (chosen) vs. subdomain (deferred):**
+- JWT claim: one application origin serves all tenants; no DNS wildcard/cert provisioning, no per-tenant CORS origin management. Simpler for this phase's admin-provisioned-only onboarding model.
+- Subdomain (e.g. `acme.formforge.app`): more "enterprise SaaS" feel, supports pre-login tenant branding, but adds DNS/cert infrastructure and per-tenant CORS handling that isn't justified without a self-service signup flow to route.
+- Revisit subdomain routing if/when self-service signup (currently a non-goal, §5) is prioritized.

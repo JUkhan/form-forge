@@ -1,13 +1,14 @@
 ---
 stepsCompleted: [1, 2, 3, 4]
-lastAmended: '2026-06-03'
+lastAmended: '2026-09-08'
 lastValidated: '2026-06-03'
-amendmentNotes: 'Augment run (FR-55..73, Dataset Manager): added FR-55..73 across new Epics 8–11 (Dataset Foundation & Custom Query, Query Builder Canvas & Joins, Builder Config, SQL Generation/Preview/Sync) — 19 new FRs, 13 new architecture decisions (6.1–6.13), AR-57–69, 27 new stories (8.1–8.10, 9.1–9.5, 10.1–10.8, 11.1–11.4); FR coverage map extended; Epic List and dependency diagram updated. Prior: Augment run (FR-54, 2026-06-02): added FR-54 Component Mode (VIEW/CRUD) — new Story 3.11 + mode-aware ACs threaded into Stories 3.2/3.4/3.8, 5.2, 6.9; NOTE: theme UX-DRs (UX-DR1..11) were found already IMPLEMENTED in code — Stories 7.7–7.10 removed; UX-DR inventory retained as documentation. Prior: extracted 11 UX-DRs; added FR-50..53 stories (welcome email, forgot password, password change, TOTP MFA) to Epic 2'
+amendmentNotes: 'Augment run (FR-74..79, Multi-Tenant Architecture, 2026-09-08): added FR-74..79 as new Epic 12 (Tenant Foundation & Provisioning) — 6 new FRs, 10 new architecture decisions (7.1–7.10), 6 new stories (12.1–12.6). Numbered last (12) to avoid renumbering any existing epic/story (the ~100 files under implementation-artifacts/ are named after existing story IDs), but sequenced FIRST — Epic 12 blocks Epic 2 in the amended dependency diagram. Tenant-scoping amendment notes threaded into Epics 2 (High), 3 (Medium), 4 (Medium), 5 (High), 6 (High), 8 (High + security rework), 9 (High), 10 (High), 11 (High, carries the tenant-isolation test-gate for Epics 8-11); Epics 1 and 7 noted unaffected. FR coverage map extended; source: sprint-change-proposal-2026-09-08.md. Prior: Augment run (FR-55..73, Dataset Manager): added FR-55..73 across new Epics 8–11 (Dataset Foundation & Custom Query, Query Builder Canvas & Joins, Builder Config, SQL Generation/Preview/Sync) — 19 new FRs, 13 new architecture decisions (6.1–6.13), AR-57–69, 27 new stories (8.1–8.10, 9.1–9.5, 10.1–10.8, 11.1–11.4); FR coverage map extended; Epic List and dependency diagram updated. Prior: Augment run (FR-54, 2026-06-02): added FR-54 Component Mode (VIEW/CRUD) — new Story 3.11 + mode-aware ACs threaded into Stories 3.2/3.4/3.8, 5.2, 6.9; NOTE: theme UX-DRs (UX-DR1..11) were found already IMPLEMENTED in code — Stories 7.7–7.10 removed; UX-DR inventory retained as documentation. Prior: extracted 11 UX-DRs; added FR-50..53 stories (welcome email, forgot password, password change, TOTP MFA) to Epic 2'
 inputDocuments:
   - _bmad-output/planning-artifacts/prds/prd-tinnitus-2026-05-22/prd.md
   - _bmad-output/planning-artifacts/prds/prd-tinnitus-2026-05-22/addendum.md
   - _bmad-output/planning-artifacts/architecture.md
   - _bmad-output/planning-artifacts/ux-design-specification.md
+  - _bmad-output/planning-artifacts/sprint-change-proposal-2026-09-08.md
 project_name: 'FormForge (tinnitus)'
 user_name: 'jukhan'
 date: '2026-05-22'
@@ -79,6 +80,18 @@ FR-53: TOTP-Based Multi-Factor Authentication — Voluntary per-user TOTP MFA co
 
 FR-54: Component Mode (VIEW / CRUD) — Every component (Designer) declares a `mode` (`CRUD` or `VIEW`) at creation, stored on `component_schemas.mode` (`NOT NULL`, immutable across versions; pre-existing rows backfilled to `CRUD`). CRUD-mode components provision a backing table and support full data entry. VIEW-mode components never provision a table, expose no `/api/data/{designerId}` endpoints (404 `TABLE_NOT_PROVISIONED`), render read-only via DynamicComponent, and are governed solely by the Menu Item's `allowedRoles` (per-Resource CRUD flags not evaluated). Designer property pickers that reference another component for its data (Dropdown "Source component", Repeater "Row form — Component") list CRUD-mode components only, with a server-side guard rejecting VIEW references on save.
 
+FR-74: Tenant Data Model & Schema-Per-Tenant Isolation — A `tenants` table (id, name, `schema_name`, status, timestamps) lives in a small fixed `public`-schema footprint. Every table that was previously global (`users`, `roles`, `user_roles`, `menus`, `component_schemas`, `custom_dataset`, every runtime-provisioned dynamic table, and the Dataset `datasets` VIEW namespace) moves into its own tenant's PostgreSQL schema. No `tenant_id` column is added anywhere; isolation is structural.
+
+FR-75: Admin-Provisioned Tenant Onboarding — A Platform-Super-Admin creates a new tenant, which synchronously provisions an isolated schema, migrates the static-schema set into it, and seeds a tenant-admin role plus first user. No self-service signup in this phase.
+
+FR-76: JWT Tenant Claim & Request-Scoped Tenant Context — The JWT gains a `tenantId` claim set at login; a `tenant_user_index (email, tenant_id)` table resolves email → tenant at login since `users` is no longer global. Tenant context is resolved before any handler runs and consumed by every tenant-scoped EF/Dapper call.
+
+FR-77: Platform-Super-Admin vs. Tenant-Admin Role Split — The single global `platform-admin` role splits into tenant-admin (full admin rights within one tenant, seeded per-tenant) and platform-super-admin (a new tier in a `public`-schema `platform_admins` table, able to create/suspend tenants, with no implicit access to any tenant's data).
+
+FR-78: Tenant Isolation Guarantee — No request may read or write data belonging to a tenant other than the one resolved via FR-76, enforced structurally (schema qualification) rather than by an omittable filter. Governs the tenant-scoping work threaded through FR-1..73, whose functional behavior is otherwise unchanged. A resource that exists only in another tenant's schema returns HTTP 404, never 403.
+
+FR-79: Tenant Administration UI — A minimal admin page lists tenants and lets a Platform-Super-Admin create a new one, visible only to that role.
+
 ### NonFunctional Requirements
 
 NFR-1 (Performance): GET /api/data/{designerId} p95 <200 ms at 100k rows with indexes on id, created_at, is_deleted, and common filter columns.
@@ -95,7 +108,7 @@ NFR-11 (Reliability): All DDL operations run in explicit PostgreSQL transactions
 NFR-12 (Reliability): API process restarts handled by Aspire/Docker orchestrator restart policy; in-flight provisioning jobs recovered on startup via ProvisioningRecoveryService.
 NFR-13 (Browser Support): Latest 2 versions of Chrome, Edge, Firefox, Safari at time of release. Vite build.target=es2022; browserslist enforced.
 NFR-14 (i18n): Architecture-ready (externalized strings, t('key') everywhere); English-only at launch.
-NFR-15 (Scale Target): Single-tenant, internal-users-only, ≤100k rows/table target (offset pagination acceptable; keyset deferred to v2).
+NFR-15 (Scale Target): ~~Single-tenant, internal-users-only~~ **Superseded 2026-09-08: Multi-tenant (admin-provisioned tenants), schema-per-tenant isolation** — see Epic 12, FR-74..79. ≤100k rows/table target per tenant still holds (offset pagination acceptable; keyset deferred to v2).
 
 ### Additional Requirements
 
@@ -269,6 +282,14 @@ UX-DR11: Stakeholder decision — Solarized accent fidelity — choose: (A, defa
 | FR-71 builder_state Persistence & Restore | Epic 11 | builder_state JSONB persisted on save; canvas restores exactly on reopen; query always in sync; Story 11.2 |
 | FR-72 Query Preview (Hard LIMIT 10) | Epic 11 | LIMIT 10 + statement timeout + formforge_preview read-only role; Story 11.3 |
 | FR-73 Builder-Mode View Lifecycle Integration | Epic 11 | Builder-mode save reuses FR-58 transactional lifecycle; Story 11.4 |
+| FR-74 Tenant Data Model & Schema-Per-Tenant Isolation | Epic 12 (new) | `tenants` table; every previously-global table moves into a per-tenant schema; Story 12.1 |
+| FR-75 Admin-Provisioned Tenant Onboarding | Epic 12 (new) | Synchronous CREATE SCHEMA + migrate + seed; tenant-admin seeded per tenant; Story 12.2 |
+| FR-76 JWT Tenant Claim & Request-Scoped Tenant Context | Epic 12 (new) | `tenantId` JWT claim; `ITenantContext`; `tenant_user_index` login lookup; Story 12.3 |
+| FR-77 Platform-Super-Admin vs. Tenant-Admin Role Split | Epic 12 (new) | `platform_admins` table separate from any tenant's `users`; Story 12.4 |
+| FR-78 Tenant Isolation Guarantee | Epic 12 (new) + **threaded into Epics 2, 3, 4, 5, 6, 8, 9, 10, 11** | Structural (schema-qualified) isolation, not a `tenant_id` filter; release-gated by the tenant-isolation test suite (architecture.md Decision 7.10); see each affected epic's Architecture-derived scope note below |
+| FR-79 Tenant Administration UI | Epic 12 (new) | Minimal Tenants list + create page, platform-super-admin only; Story 12.5 |
+
+**2026-09-08 amendment (`sprint-change-proposal-2026-09-08.md`):** FR-74..79 and Epic 12 added, reversing the single-tenant decision. Epic 12 is numbered last to avoid renumbering any existing epic/story (the ~100 files under `_bmad-output/implementation-artifacts/` are named after existing story IDs and must not be disturbed), but is sequenced FIRST in execution order — see the amended dependency diagram below, where Epic 12 blocks Epic 2. FR-1..73 are not rewritten; their functional behavior is unchanged, but per architecture.md Decisions 7.5–7.9 every dynamic SQL statement and cache key they use now carries the resolved tenant.
 
 ### UX-DR Coverage Map
 
@@ -297,6 +318,18 @@ Stand up the runnable shell of FormForge so all subsequent feature epics have a 
 **NFRs covered:** NFR-12 (restart resilience), NFR-13 (browser support / build target)
 **Architecture stories added:** G-1.1 (project scaffolding — `aspire new aspire-starter` + Vite/shadcn CLI per AR-1)
 **Architecture-derived scope:** AR-1, AR-2, AR-3 (TanStack Router override), AR-16 (security headers + CSP base), AR-24 (correlation ID middleware), AR-38 (OpenTelemetry/observability), AR-40 (multi-stage Dockerfile), AR-42 (env configuration), AR-43 (CI/CD pipeline), AR-44 (Compose parity)
+**Multi-tenant amendment (2026-09-08):** Unaffected — infrastructure/orchestration concerns have no tenant dimension.
+
+---
+
+### Epic 12: Tenant Foundation & Provisioning *(new, added 2026-09-08 — numbered last to preserve existing story IDs, but sequenced FIRST; see Epic Dependency Summary)*
+Reverses the single-tenant decision (formerly PRD Non-Goal A10). A Platform-Super-Admin creates a tenant, which provisions an isolated PostgreSQL schema, migrates every static table into it, and seeds a tenant-admin. Every request thereafter resolves to exactly one tenant via a JWT `tenantId` claim, and every tenant-scoped feature in Epics 2–6 and 8–11 is threaded with the resulting tenant context. This epic must complete before Epic 2, since the JWT shape and role model both change.
+
+**User outcome:** A Platform-Super-Admin can onboard a new tenant without direct database access. Every subsequent epic's users, roles, menus, designers, tables, and datasets are fully isolated per tenant — no cross-tenant read or write is possible, by construction rather than by convention.
+
+**FRs covered:** FR-74, FR-75, FR-76, FR-77, FR-78, FR-79
+**Architecture-derived scope:** Decisions 7.1 (tenant data model), 7.2 (provisioning service), 7.3 (JWT claim + `ITenantContext`), 7.4 (platform-super-admin/tenant-admin split), 7.5 (identifier sanitization extended to schema names), 7.6 (tenant-keyed cache), 7.9 (MinIO prefix, rate-limit partitioning, migration fan-out), 7.10 (tenant-isolation test gate)
+**Dependencies:** Epic 1 (infrastructure only — no auth/role dependency, since this epic *produces* the tenant-scoped identity model Epic 2 consumes)
 
 ---
 
@@ -308,6 +341,7 @@ Authenticated, authorized requests gate every other epic. Platform Admins manage
 **FRs covered:** FR-1, FR-2, FR-3, FR-4, FR-5, FR-6, FR-7, FR-50, FR-51, FR-52, FR-53
 **NFRs covered:** NFR-4 (auth required), NFR-5 (token storage), NFR-8 (secrets via env)
 **Architecture-derived scope:** AR-11 (permission cache + invalidation events), AR-12 (HS256 JWT), AR-13 (BCrypt-12), AR-14 (CORS), AR-15 (rate limiting), AR-17 (secret storage), AR-18 (ProblemDetails error envelope), AR-19 (API versioning posture), AR-22 (route groups with filter chain), AR-32 (httpClient with refresh-and-retry), AR-53 (MailKit email service + Mailpit dev container), AR-54 (password reset token — SHA-256 hash, 1-hour TTL), AR-55 (authenticated password change), AR-56 (TOTP MFA — Otp.NET, IDataProtector, mfaSessionToken, backup codes)
+**Multi-tenant amendment (2026-09-08, High rework — Decisions 7.6/7.7):** `users`/`roles`/`user_roles` move into each tenant's schema; permission cache key becomes `(tenantId, userId)`; the single global `platform-admin` role becomes tenant-admin, seeded per-tenant by Epic 12. **Gated by the tenant-isolation test suite (Decision 7.10) before this epic is considered done.**
 
 ---
 
@@ -320,6 +354,7 @@ Platform Admins design data-entry forms visually. The designer is ported from th
 **NFRs covered:** NFR-2 (designer save p95 <500ms)
 **Architecture stories added:** Story 3.10 Keyboard-Accessible Designer DnD (`useKeyboardDnD` per AR-30; PRD label B-11); Story 3.11 Declare and Enforce Component Mode (FR-54; PRD label B-10)
 **Architecture-derived scope:** AR-30 (parallel keyboard interaction model), AR-35 (DynamicComponent bridge preserved as black box), AR-31 (frontend folder structure for `components/designer/`), Decision 1.8 (Component Mode `component_schemas.mode`), Decision 4.10 (VIEW read-only DynamicComponent), Decision 4.11 (CRUD-only property pickers)
+**Multi-tenant amendment (2026-09-08, Medium rework — Decisions 7.6/7.7):** `component_schemas` moves into each tenant's schema (per-tenant `designer_id` uniqueness falls out of schema isolation, no composite key needed); schema registry cache key becomes `schema:{tenantId}:{designerId}:{version}`. **Gated by the tenant-isolation test suite (Decision 7.10).**
 
 ---
 
@@ -331,6 +366,7 @@ Platform Admins configure the navigation structure. Menu Items live in a 2-level
 **FRs covered:** FR-16, FR-18, FR-19, FR-20, FR-21, FR-22
 **NFRs covered:** NFR-3 (navbar fetch <100ms cached), NFR-7 (file upload validation — icon uploads establish the pattern)
 **Architecture-derived scope:** AR-21 (PagedResult shape used in admin menu list), AR-26 (MinIO upload pattern for icons — establishes pattern reused in Epic 6 for Image fields)
+**Multi-tenant amendment (2026-09-08, Medium rework — Decision 7.6):** `menus` moves into each tenant's schema. Navbar cache stays keyed per-user (no change) — correct once the underlying data is tenant-isolated. **Gated by the tenant-isolation test suite (Decision 7.10).**
 
 ---
 
@@ -343,6 +379,7 @@ Binding a Published Designer version to a Menu Item provisions a real PostgreSQL
 **NFRs covered:** NFR-6 (SQL injection defense), NFR-9 (schema audit log append-only), NFR-11 (transactional DDL with rollback)
 **Architecture stories added:** ProvisioningRecoveryService (re-enqueues Pending jobs at startup per AR-52)
 **Architecture-derived scope:** AR-4 (identifier sanitization pipeline + `SafeIdentifier`), AR-5 (complete 14-component PG type mapping), AR-6 (soft-delete cascade column — schema-level prep), AR-7 (schema registry cache), AR-8 (audit log indexing), AR-9 (EF/Dapper separated transactions + Channel + BackgroundService), AR-10 (EF migrations on startup), AR-23 (binding-diff endpoint for re-bind), AR-37 (single-consumer DDL queue), AR-52 (recovery service)
+**Multi-tenant amendment (2026-09-08, High rework — Decisions 7.5/7.7):** `SafeIdentifier`, `DdlEmitter`, and `SchemaRegistry` become tenant-schema-qualified instead of assuming `public` (table-name validation logic itself is unchanged — only the schema qualifier changes); `ProvisioningJob` gains `TenantId`/`TenantSchema`; `ProvisioningRecoveryService`'s startup scan becomes tenant-aware. **Gated by the tenant-isolation test suite (Decision 7.10).**
 
 ---
 
@@ -354,6 +391,7 @@ End-users create, read, update, and soft-delete records through a generic, permi
 **FRs covered:** FR-29, FR-30, FR-31, FR-32, FR-33, FR-34, FR-35, FR-36, FR-39, FR-40, FR-41
 **NFRs covered:** NFR-1 (p95 <200ms @100k rows), NFR-7 (file upload validation — Image fields), NFR-10 (CRUD mutation audit log append-only)
 **Architecture-derived scope:** AR-6 (soft-delete cascade walk via schema registry), AR-20 (Layer 2 dynamic payload validator), AR-21 (PagedResult), AR-26 (presigned URLs for Image fields + /api/files/refresh-urls), AR-28 (error/loading boundaries), AR-29 (sonner toasts), AR-34 (react-hook-form + Zod), AR-46 (Option C hybrid JSON casing for dynamic endpoints), AR-48 (TanStack Query key tuples), AR-49 (mutation strategy — pessimistic for form saves)
+**Multi-tenant amendment (2026-09-08, High rework — Decisions 7.7/7.9, FR-78):** ~30 SQL-assembly methods across `DynamicQueryBuilder`, `SoftDeleteCascade`, and `RepeaterWriteCoordinator` schema-qualify every table reference via the resolved tenant context instead of assuming `public`; MinIO object-key prefixes gain a tenant segment; rate-limit partitions gain a tenant dimension. **New acceptance criterion on every story in this epic:** a request for a `designerId` that exists only in another tenant's schema must return HTTP 404 (`TABLE_NOT_PROVISIONED`), never HTTP 403 — existence of another tenant's table is never confirmed or denied. **Gated by the tenant-isolation test suite (Decision 7.10) before this epic is considered done.**
 
 ---
 
@@ -366,6 +404,7 @@ Final epic — verify and harden the cross-cutting concerns that have been built
 **NFRs covered:** NFR-14 (i18n architecture-ready, English-only at launch)
 **UX-DRs covered:** UX-DR1–UX-DR11 (theme token system remediation — from `ux-design-specification.md`; **implemented directly in code, verified 2026-06-02 — not tracked as separate Epic 7 stories**; see UX Design Requirements section)
 **Architecture-derived scope:** AR-27 (theme no-flash hydration with CSP nonce), AR-33 (i18n synchronous init), AR-39 (single-origin SPA hosting from API)
+**Multi-tenant amendment (2026-09-08):** Largely unaffected — no per-tenant branding/theming hook exists yet; noted as a gap for a future phase, not in scope here.
 
 ---
 
@@ -377,8 +416,9 @@ Deliver the Dataset Manager subsystem foundation: the `custom_dataset` table and
 **FRs covered:** FR-55, FR-56, FR-57, FR-58, FR-59, FR-60, FR-61, FR-62
 **NFRs covered:** NFR-17 (Dataset Manager security — identifier quoting, parameterized values, SELECT-only enforcement, table allowlist, transactional DDL, optimistic concurrency)
 **Architecture-derived scope:** AR-57 (schema + migration + datasets PG schema), AR-58 (dataset-management permission model), AR-59 (transactional view lifecycle — synchronous NpgsqlTransaction), AR-60 (optimistic concurrency version column), AR-61 (SELECT-only enforcement via PgQuery.NET), AR-65 (Dataset API contract + 7 new error codes)
+**Multi-tenant amendment (2026-09-08, High rework — Decision 7.8; not mechanical, a real security rework):** the `datasets` VIEW schema is provisioned per tenant instead of a single shared schema; the `formforge_preview` role's grants are scoped per-tenant-schema instead of `GRANT SELECT ON ALL TABLES IN SCHEMA public`. Prior to this amendment, a Custom Query author (FR-60) had no structural tenant boundary at all. **Gated by the tenant-isolation test suite (Decision 7.10) before this epic is considered done.**
 
-**Dependencies:** Epic 2 (RBAC infrastructure for dataset-management permission), Epic 1 (EF migrations + Dapper infrastructure)
+**Dependencies:** Epic 12 (tenant context must exist before per-tenant `datasets` schema provisioning), Epic 2 (RBAC infrastructure for dataset-management permission), Epic 1 (EF migrations + Dapper infrastructure)
 
 ---
 
@@ -389,6 +429,7 @@ The visual Query Builder replaces the SQL textarea with a React Flow canvas. Use
 
 **FRs covered:** FR-63, FR-64, FR-65, FR-66
 **Architecture-derived scope:** AR-62 (table allowlist via appsettings.json + catalog endpoint GET /api/datasets/catalog), AR-68 (React Flow @xyflow/react v12; TableNode, JoinEdge, JoinInspector custom types)
+**Multi-tenant amendment (2026-09-08, High rework — Decision 7.8):** the Table Palette's catalog discovery (`DatasetAllowlist`'s `information_schema` query) is scoped to the caller's tenant schema — a tenant cannot enumerate, let alone drag onto the canvas, another tenant's tables. **Gated by the tenant-isolation test suite (Decision 7.10).**
 
 **Dependencies:** Epic 8 (Dataset Foundation — RBAC + API contract + catalog endpoint foundation)
 
@@ -401,6 +442,7 @@ Adds the column selection, aggregate/alias, CASE derived columns, calculated col
 
 **FRs covered:** FR-67, FR-68, FR-69
 **Architecture-derived scope:** AR-64 (CASE/calculated expression security — per-expression keyword scan + wrap-parse + final SELECT-only check), AR-67 (builder_state schema contract — canonical TS interface + C# BuilderStateDto), AR-68 (TableNode column list + FilterConditionsDialog + OrderByPanel)
+**Multi-tenant amendment (2026-09-08, High rework — Decision 7.8):** no configuration surface in this epic references a table name directly server-side beyond what Epic 9's allowlist already scopes; column/filter/CASE/calculated-column config is tenant-agnostic once the underlying table set is tenant-scoped. **Gated by the tenant-isolation test suite (Decision 7.10).**
 
 **Dependencies:** Epic 9 (Query Builder Canvas — canvas nodes and edges are prerequisites for column/filter/ORDER BY configuration)
 
@@ -413,8 +455,9 @@ Closes the Query Builder loop: the server generates authoritative SQL from `buil
 
 **FRs covered:** FR-70, FR-71, FR-72, FR-73
 **Architecture-derived scope:** AR-63 (preview execution isolation — formforge_preview read-only PG role; IPreviewConnectionFactory MaxPoolSize=5; SET LOCAL statement_timeout), AR-66 (DatasetSqlGenerator 10-step algorithm), AR-67 (builder_state contract — generator and canvas implement same interface)
+**Multi-tenant amendment (2026-09-08, High rework — Decision 7.8):** `DatasetSqlGenerator`'s `FROM` clause is schema-qualified against the resolved tenant context, injected server-side and never accepted from `builder_state`; the `formforge_preview` role's tenant-scoped grants (Epic 8 amendment) mean Preview cannot cross tenants even if a crafted query tried. **This epic carries the full tenant-isolation test suite (Decision 7.10) as its release gate for all of Epics 8–11 — the suite must pass here, not just be planned.**
 
-**Dependencies:** Epic 10 (Builder Config — SQL generator consumes full builder_state including columns, filters, ORDER BY, CASE, calculated columns), Epic 8 (view lifecycle — builder-mode saves reuse FR-58 lifecycle)
+**Dependencies:** Epic 12 (tenant context feeds the generator and the preview connection factory), Epic 10 (Builder Config — SQL generator consumes full builder_state including columns, filters, ORDER BY, CASE, calculated columns), Epic 8 (view lifecycle — builder-mode saves reuse FR-58 lifecycle)
 
 ---
 
@@ -422,27 +465,29 @@ Closes the Query Builder loop: the server generates authoritative SQL from `buil
 
 ```
 Epic 1 (Foundation)
-  └─► Epic 2 (Identity)
-        ├─► Epic 3 (Designer)
-        │     └─► Epic 5 (Provisioning) ──► Epic 6 (CRUD + Data Entry)
-        └─► Epic 4 (Menus) ─────────────┘                │
-                                                          └─► Epic 7 (Polish)
-        └─► Epic 8 (Dataset Foundation)
-                └─► Epic 9 (Query Builder Canvas)
-                        └─► Epic 10 (Builder Config)
-                                └─► Epic 11 (SQL Gen, Preview & Sync)
+  └─► Epic 12 (Tenant Foundation)  ◄── new 2026-09-08; numbered last, sequenced first
+        └─► Epic 2 (Identity)
+              ├─► Epic 3 (Designer)
+              │     └─► Epic 5 (Provisioning) ──► Epic 6 (CRUD + Data Entry)
+              └─► Epic 4 (Menus) ─────────────┘                │
+                                                                └─► Epic 7 (Polish)
+              └─► Epic 8 (Dataset Foundation)
+                      └─► Epic 9 (Query Builder Canvas)
+                              └─► Epic 10 (Builder Config)
+                                      └─► Epic 11 (SQL Gen, Preview & Sync)
 ```
 
-- Epic 1 unblocks every other epic.
+- Epic 1 unblocks Epic 12 and, transitively, every other epic.
+- **Epic 12 (Tenant Foundation, new)** requires only Epic 1 and blocks Epic 2 — the JWT shape (`tenantId` claim) and role model (tenant-admin vs. platform-super-admin) it introduces are consumed by every identity-dependent epic downstream. **Numbered 12 to avoid renumbering any existing epic/story, but must be built and completed before Epic 2 starts.**
 - Epic 2 (Identity) unblocks Epics 3, 4 (admin pages require auth + admin role).
 - Epic 3 (Designer) and Epic 4 (Menus) are independent of each other and can run in parallel after Epic 2.
 - Epic 5 (Provisioning) requires Epic 3 (Designer versions to bind) and Epic 4 (Menu Items to bind to).
 - Epic 6 (CRUD) requires Epic 5 (tables must exist) and Epic 3's DynamicComponent renderer.
 - Epic 7 (Polish) runs last — exercises the rest of the platform.
-- **Epic 8 (Dataset Foundation)** requires Epic 2 (RBAC infrastructure for `dataset-management` permission) and Epic 1 (EF migrations + Dapper). It is independent of Epics 3–7 and can run in parallel with any of them.
+- **Epic 8 (Dataset Foundation)** requires Epic 12 (tenant context, for the per-tenant `datasets` schema), Epic 2 (RBAC infrastructure for `dataset-management` permission) and Epic 1 (EF migrations + Dapper). It is independent of Epics 3–7 and can run in parallel with any of them.
 - **Epic 9 (Query Builder Canvas)** requires Epic 8 (catalog endpoint + Dataset CRUD API contract).
 - **Epic 10 (Builder Config)** requires Epic 9 (canvas nodes + edges as prerequisites for column/filter config).
-- **Epic 11 (SQL Gen, Preview & Sync)** requires Epic 10 (full builder_state including columns, filters, ORDER BY) and Epic 8 (view lifecycle for builder-mode saves).
+- **Epic 11 (SQL Gen, Preview & Sync)** requires Epic 10 (full builder_state including columns, filters, ORDER BY), Epic 8 (view lifecycle for builder-mode saves), and Epic 12 (tenant-scoped preview role). **This is where the tenant-isolation test suite (Decision 7.10) gates release for the whole Epic 8–11 chain.**
 
 ---
 
@@ -2948,3 +2993,135 @@ So that Query Builder saves have identical atomicity and rollback safety to Cust
 **Given** the save succeeds
 **When** I inspect `dataset_audit_log`
 **Then** the `ddl` field contains the server-generated SQL, and a note or metadata indicates "Builder-generated" (per FR-73 AC-4)
+
+---
+
+## Epic 12: Tenant Foundation & Provisioning
+
+*Added 2026-09-08 via `sprint-change-proposal-2026-09-08.md`, reversing the single-tenant decision recorded at PRD inception (formerly Non-Goal A10 / Decision Log #3). Numbered 12 to avoid renumbering any existing epic or story — the ~100 files under `_bmad-output/implementation-artifacts/` are named after existing story IDs and must not be disturbed — but this epic must be built and completed before Epic 2, since the JWT shape and role model it introduces are consumed by every identity-dependent epic downstream. See `architecture.md` Decisions 7.1–7.10 for the full technical design and `prd.md` Epic T for the source requirements (FR-74..79, Stories T-1..T-6, which map 1:1 to Stories 12.1–12.6 below).*
+
+A Platform-Super-Admin creates a new tenant, which provisions an isolated PostgreSQL schema, migrates the full static-schema set into it, and seeds a tenant-admin role plus first user. Every subsequent request resolves to exactly one tenant via a JWT `tenantId` claim, and no `tenant_id` column or row-level filter is used anywhere — isolation is structural (schema-level), which is the central risk-reduction property of this epic (see the addendum's "Options Considered: Multi-Tenant Isolation Model" for the full rationale against a shared-tables + `tenant_id` alternative).
+
+### Story 12.1: Tenant Data Model
+
+As the system,
+I persist a `tenants` row (id, name, `schema_name`, status, timestamps) in a small, fixed `public`-schema footprint,
+So that every subsequent tenant-scoped operation has a schema to resolve.
+
+**Acceptance Criteria:**
+
+**Given** a request to create a tenant
+**When** the `schema_name` is validated
+**Then** it is checked against the same `SafeIdentifier` regex and reserved-keyword rules used for `designerId` (Decision 1.1/7.5) and rejected if it collides with an existing tenant's schema name (per FR-74 AC-1 / Decision 7.1)
+
+**Given** a new `tenants` row is inserted
+**When** the row is created
+**Then** `status` starts as `Provisioning` and only transitions to `Active` after Story 12.2's provisioning sequence completes successfully (per FR-74 AC-2 / Decision 7.1)
+
+**Given** the `tenants` table
+**When** I inspect the schema
+**Then** only `tenants`, `platform_admins` (Story 12.4), and `tenant_user_index` (Story 12.3) remain in the `public` schema — every other table that was previously global (`users`, `roles`, `user_roles`, `menus`, `component_schemas`, `custom_dataset`, every runtime-provisioned dynamic table, and the Dataset `datasets` VIEW namespace) is provisioned per-tenant, never in `public` (per FR-74 / Decision 7.1)
+
+### Story 12.2: Tenant Provisioning Service
+
+As a Platform-Super-Admin,
+I can create a new tenant,
+So that a new customer/organization gets an isolated, ready-to-use instance of FormForge without direct database access.
+
+**Acceptance Criteria:**
+
+**Given** a valid tenant creation request
+**When** `ITenantProvisioningService` runs
+**Then** it executes, in sequence: `CREATE SCHEMA "{schema_name}"`, applies the full static-schema EF migration set into that schema, creates the tenant-scoped `{schema_name}_datasets` VIEW namespace, and scopes `formforge_preview` grants to that schema (per FR-75 AC-1 / Decisions 7.2, 7.8)
+
+**Given** the schema and migrations are in place
+**When** provisioning continues
+**Then** a tenant-admin role and its first user are seeded in the new schema, and the welcome email flow (FR-50) fires for that first user (per FR-75 AC-2 / Decision 7.2)
+
+**Given** any step before the sequence completes fails
+**When** the process crashes or errors
+**Then** the tenant row is left at `status = 'Provisioning'`; a `TenantProvisioningRecoveryService` (mirroring the FR-17 `ProvisioningRecoveryService` pattern) scans for stuck rows on startup and flags them for admin attention rather than silently retrying partially-applied DDL (per FR-75 AC-3 / Decision 7.2)
+
+**Given** the full sequence completes without error
+**When** the last step commits
+**Then** `status` becomes `Active` and the tenant is usable (per FR-75 AC-4 / Decision 7.2)
+
+### Story 12.3: Tenant Context Resolution
+
+As the system,
+I resolve the caller's tenant schema from the JWT `tenantId` claim before any handler runs,
+So that every tenant-scoped feature has a single, trustworthy source for "which tenant."
+
+**Acceptance Criteria:**
+
+**Given** any authenticated request
+**When** the request pipeline runs
+**Then** `ITenantContext` middleware resolves `tenantId` from the validated JWT claim immediately after correlation-ID assignment and before `RequireAuth`/permission checks (per FR-76 AC-1 / Decision 7.3)
+
+**Given** a JWT `tenantId` claim referencing a non-existent or non-`Active` tenant
+**When** the middleware resolves it
+**Then** the request is rejected with HTTP 401 — never a partial or degraded response (per FR-76 AC-2 / Decision 7.3)
+
+**Given** an unauthenticated login request
+**When** the submitting email is looked up
+**Then** the `tenant_user_index (email, tenant_id)` table (populated at user creation and tenant provisioning) resolves email → tenant before the tenant-scoped credential check runs, since `users` is no longer a single global table (per FR-76 AC-3 / Decision 7.3)
+
+### Story 12.4: Platform-Super-Admin Bootstrap
+
+As the system,
+I seed the first platform-super-admin at startup, replacing the prior single global `platform-admin` bootstrap,
+So that there is always at least one account able to provision the first tenant.
+
+**Acceptance Criteria:**
+
+**Given** the API starts for the first time
+**When** the bootstrap check runs
+**Then** the first platform-super-admin account is seeded into the `public`-schema `platform_admins` table — never as a row in any tenant's `users` table (per FR-77 AC-1 / Decision 7.4)
+
+**Given** an authenticated platform-super-admin
+**When** they call any `/api/data/*`, `/api/datasets/*`, or tenant-admin endpoint
+**Then** access is denied — platform-super-admins have no implicit access to any tenant's data; their only surface is `/api/admin/tenants/*` (Story 12.5) (per FR-77 AC-2 / Decision 7.4)
+
+**Given** a tenant is provisioned (Story 12.2)
+**When** its first user is seeded
+**Then** that user receives the tenant-admin role (what the single global `platform-admin` role meant before this epic) — scoped to that tenant only, distinct from the platform-super-admin tier (per FR-77 / Decision 7.4)
+
+### Story 12.5: Tenants Admin Page
+
+As a Platform-Super-Admin,
+I can view a list of tenants and create a new one,
+So that I can onboard customers without direct database access.
+
+**Acceptance Criteria:**
+
+**Given** I am authenticated as a platform-super-admin
+**When** I navigate to `/admin/tenants`
+**Then** I see a list of tenants with name, `schema_name`, status, and created date; the route is inaccessible to any other role (per FR-79 AC-1 / Decision 7.2)
+
+**Given** the Tenants page
+**When** I submit the "Create Tenant" form with a name and `schema_name`
+**Then** Story 12.2's provisioning flow is triggered and the row shows Pending/Active/Error status, polling until resolution (per FR-79 AC-2 / Decision 7.2)
+
+### Story 12.6: Tenant Context Middleware Integration
+
+As the system,
+I apply the resolved tenant schema to every EF and Dapper call in the request pipeline,
+So that no feature has to resolve a tenant schema any other way, and no request can cross a tenant boundary by omission.
+
+**Acceptance Criteria:**
+
+**Given** any request past `ITenantContext` resolution (Story 12.3)
+**When** a static-schema query runs via EF or a dynamic query runs via Dapper
+**Then** both consume the same request-scoped tenant context — there is no code path that resolves a tenant schema independently (per FR-78 AC-1 / Decision 7.7)
+
+**Given** any feature code added in Epics 2–6 and 8–11
+**When** it references a table this epic moved into a tenant schema
+**Then** it never hardcodes `public` as the schema qualifier for that table (per FR-78 / Decision 7.7)
+
+**Given** a request for a `designerId`, `dataset_name`, or record that exists only in another tenant's schema
+**When** the resolved tenant's schema is queried
+**Then** the response is HTTP 404 — never HTTP 403 — so another tenant's resource existence is never confirmed or denied (per FR-78 AC-2 / Decision 7.7)
+
+**Given** the full platform after Epics 2, 3, 4, 5, 6, and 8–11 are complete
+**When** the tenant-isolation integration test suite runs (Decision 7.10: 2+ tenants provisioned in a Testcontainers run, asserting no cross-tenant reads/writes across CRUD, Dataset, Query Builder, MinIO, and admin endpoints)
+**Then** it passes as a release gate — not ordinary coverage — before any of those epics is considered done (per FR-78 / Decision 7.10)

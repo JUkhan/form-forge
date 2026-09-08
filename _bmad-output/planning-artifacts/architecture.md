@@ -3,6 +3,7 @@ stepsCompleted: [1, 2, 3, 4, 5, 6, 7, 8]
 inputDocuments:
   - _bmad-output/planning-artifacts/prds/prd-tinnitus-2026-05-22/prd.md
   - _bmad-output/planning-artifacts/prds/prd-tinnitus-2026-05-22/addendum.md
+  - _bmad-output/planning-artifacts/sprint-change-proposal-2026-09-08.md
 workflowType: 'architecture'
 project_name: 'FormForge (tinnitus)'
 user_name: 'jukhan'
@@ -10,8 +11,8 @@ date: '2026-05-22'
 lastStep: 8
 status: 'complete'
 completedAt: '2026-05-22'
-updatedAt: '2026-06-03'
-prdUpdateNotes: 'FR-50..53 added (welcome email, forgot password, password change, TOTP MFA); decisions 2.9–2.12; AD-12 + OQ-7 resolved. 2026-06-02: FR-54 Component Mode (CRUD/VIEW) added — decisions 1.8 + 4.11, DynamicComponent VIEW read-only (4.10); story collision resolved (a11y DnD renumbered B-11); OQ-9 noted. 2026-06-03: FR-55..73 Dataset Manager (Epics H–K) added — decisions 6.1–6.13; AD-14..19 + OQ-11 + OQ-13 resolved; 19 new FRs, 13 new decisions'
+updatedAt: '2026-09-08'
+prdUpdateNotes: 'FR-50..53 added (welcome email, forgot password, password change, TOTP MFA); decisions 2.9–2.12; AD-12 + OQ-7 resolved. 2026-06-02: FR-54 Component Mode (CRUD/VIEW) added — decisions 1.8 + 4.11, DynamicComponent VIEW read-only (4.10); story collision resolved (a11y DnD renumbered B-11); OQ-9 noted. 2026-06-03: FR-55..73 Dataset Manager (Epics H–K) added — decisions 6.1–6.13; AD-14..19 + OQ-11 + OQ-13 resolved; 19 new FRs, 13 new decisions. 2026-09-08: Multi-Tenant Architecture added via Sprint Change Proposal (reverses PRD Decision Log #3 / Non-Goal A10 / NFR-15) — decisions 7.1–7.10, schema-per-tenant isolation, JWT-claim routing, admin-provisioned onboarding, new Tenant Foundation & Provisioning epic; 10 new decisions (64→74); risk register R-18..R-20 added; PRD and epics.md amendments still pending PM/epic-breakdown handoff — architecture is ready, formal requirements docs are not yet in sync'
 ---
 
 # Architecture Decision Document — FormForge
@@ -45,7 +46,7 @@ The architecturally consequential FR clusters are:
 
 - **Primary domain:** Full-stack web — React SPA + .NET 10 ASP.NET Core Minimal APIs + PostgreSQL + MinIO.
 - **Complexity level:** High — driven by runtime DDL, recursive Repeater provisioning, EF/Dapper transaction boundary, and dual-layer permission caching. Feature count alone would suggest medium; the runtime-DDL backbone elevates it.
-- **Deployment model:** Single-tenant, internal-users-only, ≤100k rows/table target (offset pagination acceptable for v1; keyset deferred to v2).
+- **Deployment model:** ~~Single-tenant, internal-users-only~~ **Superseded 2026-09-08 (Sprint Change Proposal): Multi-tenant, schema-per-tenant isolation, admin-provisioned onboarding** — see Decisions 7.1–7.10. ≤100k rows/table target per tenant (offset pagination acceptable for v1; keyset deferred to v2) still holds.
 - **Estimated architectural components:**
   - Static-schema data layer (EF Core): `users`, `roles`, `user_roles`, `menus`, `component_schemas`, `refresh_tokens`, `schema_audit_log`, `mutation_audit_log`.
   - Dynamic-schema data layer (Dapper): runtime-provisioned tables per `designerId` + per-child Repeater table.
@@ -1047,19 +1048,140 @@ Follows the tuple convention (Implementation Patterns — Communication Patterns
 
 ---
 
+### Multi-Tenant Architecture — Tenant Foundation (Sprint Change Proposal 2026-09-08)
+
+This addendum reverses the locked single-tenant decision (formerly PRD Decision Log #3 / Non-Goal A10 / NFR-15) per the approved Sprint Change Proposal (`_bmad-output/planning-artifacts/sprint-change-proposal-2026-09-08.md`). Decisions 7.1–7.10 govern all multi-tenancy work and take precedence over any prior wording in Decisions 1.x–6.x that assumed a single global `public` schema. **Isolation model: schema-per-tenant** (evaluated against shared-tables + `tenant_id` and rejected — see proposal §2.3 — because the amount of dynamic and user-authored SQL already in this codebase, especially Dataset Custom Query, makes a per-query filter convention an unacceptable residual leak risk). **Tenant routing: JWT claim, not subdomain.** **Onboarding: admin-provisioned only** — no self-service signup, no billing/plan tiers, no custom domains in this phase (new PRD non-goals, pending PM amendment per proposal §4.1).
+
+---
+
+#### Data Architecture — Multi-Tenancy
+
+#### 7.1 — Tenant Data Model & Schema-Per-Tenant Isolation
+
+**EF Core-managed table, in a small fixed `public`-schema footprint (the only rows that remain global):**
+
+`tenants`:
+- `id UUID PK DEFAULT gen_random_uuid()`
+- `name TEXT NOT NULL`
+- `schema_name TEXT UNIQUE NOT NULL` — validated via the same `SafeIdentifier` regex as Decision 1.1 (`^[a-z_][a-z0-9_]{0,62}$` + reserved-keyword check); this is the PostgreSQL schema, e.g. `tenant_acme`
+- `status TEXT NOT NULL CHECK (status IN ('Provisioning','Active','Suspended'))`
+- `created_at TIMESTAMPTZ DEFAULT now()`, `created_by UUID` (references a `platform_admins` row, not a tenant `users` row)
+
+**Everything that was previously a global `public`-schema table moves into each tenant's own schema**, provisioned per Decision 7.2: `users`, `roles`, `user_roles`, `menus`, `menu_role_assignments`, `component_schemas`, `refresh_tokens`, `password_reset_tokens`, `mfa_backup_codes`, `schema_audit_log`, `mutation_audit_log`, `custom_dataset`, `dataset_audit_log`, plus every runtime-provisioned dynamic table (Decision 1.1) and the `datasets` VIEW schema (Decision 6.1, amended by 7.8). Only `tenants` and the new `platform_admins` table (Decision 7.4) remain in `public`.
+
+**Uniqueness consequence:** because each tenant's static and dynamic tables live in their own schema, `designer_id`/`dataset_name`/`menu` uniqueness is enforced per-tenant automatically by schema isolation — no composite keys are introduced.
+
+#### 7.2 — Tenant Provisioning Service
+
+New `ITenantProvisioningService`, modeled on the existing `IProvisioningService` (Decision 1.6) but **synchronous** (tenant creation is a rare admin action, not a request-path hot path):
+
+```
+1. Validate `schema_name` via SafeIdentifier; reject collisions against existing tenants.
+2. INSERT INTO tenants (..., status='Provisioning') — EF Core, own transaction.
+3. CREATE SCHEMA "{schema_name}" — Dapper DDL, own transaction.
+4. Apply the full static-schema EF migration set into "{schema_name}" (same migrations used for `public` pre-7.x, now targeted per-tenant via a scripted `search_path` swap — see Decision 7.9).
+5. CREATE SCHEMA "{schema_name}_datasets" (tenant-scoped Dataset VIEW namespace — Decision 7.8) and set `formforge_preview` grants scoped to "{schema_name}" only (Decision 7.8).
+6. Seed the tenant-admin role (Decision 7.4) + first user in "{schema_name}".users; dispatch welcome email (reuses AR-53/Decision 2.9).
+7. UPDATE tenants SET status='Active'.
+```
+
+Any failure before step 7 leaves `status='Provisioning'`; a `TenantProvisioningRecoveryService` (mirroring Decision 1.6's `ProvisioningRecoveryService`) scans for stuck `Provisioning` rows on startup and either resumes or flags them for admin attention — it does not silently retry DDL that may have partially applied.
+
+#### 7.3 — Tenant Identification & Request-Scoped Context
+
+**JWT gains a `tenantId` claim** (extends Decision 2.3), set at login from the authenticating user's tenant membership. A user belongs to exactly one tenant in this phase (no cross-tenant membership).
+
+**New `ITenantContext` middleware**, registered immediately after `CorrelationIdMiddleware` and before `RequireAuth`:
+1. Resolves `tenantId` from the validated JWT claim.
+2. Loads the tenant's `schema_name` (cached — reuses `ICacheStore`, Decision 5.1, keyed `tenant:{tenantId}`, 5-min TTL).
+3. Sets the ambient tenant schema for the rest of the request — exposed to both EF (a per-request `DbContext` with `MapSchema`/`HasDefaultSchema` set dynamically) and Dapper (`ITenantContext.SchemaName` consumed explicitly by every query-building call site — Decision 7.7).
+4. **Defense-in-depth check:** the resolved schema must exist and the tenant's `status` must be `Active`, or the request is rejected with 401 — a stale/forged claim referencing a suspended or deleted tenant never reaches a handler.
+
+Unauthenticated routes (`/api/auth/login`, `/health/live`, `/health/ready`) have no tenant context; login resolves the user's tenant by looking up the email across... **see Decision 7.4 for how login finds the right tenant without a global users table.**
+
+**Login lookup mechanic:** because `users` now lives per-tenant, login cannot do a single global `SELECT * FROM users WHERE email=...`. A small `public`-schema `tenant_user_index (email, tenant_id)` lookup table (populated/maintained by the tenant provisioning service and every user-creation call) resolves email → tenant before the tenant-scoped credential check runs. This is the one piece of user-identifying data that must stay global; it stores no credentials, only the routing pointer.
+
+#### 7.4 — Platform-Super-Admin vs. Tenant-Admin Role Split
+
+The single global `platform-admin` role (Decision 2.2, formerly seeded once at bootstrap) splits into two tiers:
+
+- **Tenant-admin** — what `platform-admin` meant before this amendment: full administrative rights *within one tenant's schema* (users, roles, menus, designers, datasets). Seeded per-tenant by Decision 7.2 step 6. `PermissionService`'s hardcoded role-GUID check (previously assuming one global admin) becomes a per-tenant role lookup.
+- **Platform-super-admin** — new tier, rows live in the `public`-schema `platform_admins (id, user_email, password_hash, created_at)` table, entirely separate from any tenant's `users` table. Can create/suspend tenants and view the `tenants` list (Decision 7.2's admin UI) but has **no** implicit access to any tenant's data — the schema/grant boundary applies to platform-super-admins too, not just tenant users.
+
+**Bootstrap:** the first platform-super-admin is seeded via the existing startup bootstrap mechanism (`Program.cs`, formerly seeding the single global `platform-admin`); it now seeds into `platform_admins` instead.
+
+#### 7.5 — Identifier Sanitization Extended to Tenant Schema Names (extends Decision 1.1)
+
+`SafeIdentifier`'s regex and reserved-keyword logic are unchanged and reused as-is for `tenants.schema_name` — no new validator class. Every DDL/DML call site that previously assumed `table_schema = 'public'` now carries a second validated `SafeIdentifier` for the schema, and both are quoted independently (`"{tenantSchema}"."{tableName}"`), never concatenated into a single string before quoting.
+
+#### 7.6 — Cache Keys Extended with Tenant Dimension (extends Decisions 1.4, 2.2)
+
+- **Schema registry (1.4):** cache key becomes `schema:{tenantId}:{designerId}:{version}` (was `schema:{designerId}:{version}`).
+- **Permission cache (2.2):** cache key becomes `(tenantId, userId)` (was `userId`). `EffectivePermissions` record gains `TenantId: Guid`.
+- **Dataset allowlist/catalog cache (6.6):** cache key becomes `catalog:{tenantId}` (was global).
+- **Navbar/menu cache:** no key change needed — remains per-user, correct once the underlying `menus` data is tenant-isolated by Decision 7.1.
+
+All three reuse the same `ICacheStore` (Decision 5.1); the v2 Redis swap is unaffected by this change.
+
+#### 7.7 — Dynamic Provisioning & CRUD: Schema Qualification (extends Decisions 1.6, 1.7, 3.3, 3.5)
+
+Every DDL and dynamic-CRUD SQL-assembly call site that referenced `"public"."{tableName}"` (implicitly or via a hardcoded `table_schema = 'public'` predicate in `information_schema` lookups) is qualified against `ITenantContext.SchemaName` (Decision 7.3) instead:
+
+- `DdlEmitter` (table existence checks, `CREATE TABLE`, `ALTER TABLE ADD COLUMN`) — schema qualifier changes; table-name validation logic (Decision 1.1) is unchanged.
+- `DynamicQueryBuilder` (all SELECT/INSERT/UPDATE/DELETE/tree-query/export methods), `SoftDeleteCascade`, `RepeaterWriteCoordinator` — same schema-qualification change, no predicate logic added or changed.
+- `SchemaRegistry` — cache key per Decision 7.6; registry population reads `component_schemas` from the tenant's own schema (via the request-scoped `DbContext`, Decision 7.3).
+- `ProvisioningJob` (Decision 1.6) gains `TenantId`/`TenantSchema` fields; `ProvisioningRecoveryService`'s startup scan becomes tenant-aware (iterates all tenants' `Pending` jobs, not one global set).
+
+**Explicitly not changed:** no `tenant_id` column is added to any dynamic or static table, and no query gains a `WHERE tenant_id = ...` predicate. Isolation is enforced by the schema qualifier and PostgreSQL's own schema/role permission model, not by an application-level filter — this is the central risk-reduction property of the schema-per-tenant decision (proposal §2.3).
+
+**New acceptance criterion (applies to every Epic 5/6 story):** a request authenticated for Tenant A must never successfully read or write a table that exists only in Tenant B's schema, even given a guessed/enumerated `designerId` — the correct failure mode is 404 (`TABLE_NOT_PROVISIONED`), not 403, so tenant B's table existence is never confirmed or denied to tenant A.
+
+#### 7.8 — Dataset Manager Multi-Tenant Isolation (extends Decisions 6.1, 6.6, 6.7, 6.10)
+
+This is the one area requiring more than mechanical schema-qualification, because Custom Query Mode (Decision 6.5/FR-60) lets a trusted user author raw SQL with no structural tenant boundary today:
+
+- **6.1 (View namespace):** `datasets` schema becomes tenant-scoped — provisioned per-tenant as `"{tenantSchema}_datasets"` during Decision 7.2 step 5, not a single shared `datasets` schema.
+- **6.6 (Table allowlist & catalog):** `DatasetAllowlist`'s `information_schema` discovery query is scoped to `table_schema = @tenantSchema` — a tenant's Query Builder and Custom Query catalog can only ever enumerate that tenant's own tables. This closes the previously-identified leak vector structurally (a tenant cannot even *see* another tenant's table names, let alone query them).
+- **6.7 (Preview role):** `formforge_preview`'s grants are no longer `GRANT SELECT ON ALL TABLES IN SCHEMA public`. Grants are issued per-tenant-schema at provisioning time (Decision 7.2 step 5): `GRANT SELECT ON ALL TABLES IN SCHEMA "{tenantSchema}" TO formforge_preview` (still with the internal-table `REVOKE` list applied within that schema). The preview connection additionally sets `SET search_path = "{tenantSchema}"` per request so a crafted query cannot schema-qualify its way to another tenant even if it tried.
+- **6.10 (SQL generator):** `DatasetSqlGenerator`'s `FROM "public"."<table>"` becomes `FROM "{tenantSchema}"."<table>"`, with `tenantSchema` injected server-side from `ITenantContext` — never accepted from the client, never present in `builder_state` JSON.
+- **6.5 (SELECT-only enforcement):** unchanged; remains a necessary but no longer sole line of defense, now backstopped by the schema-scoped allowlist and role grants above.
+
+**This decision is flagged as a hard gate, not an implementation nicety** — see Decision 7.10.
+
+#### 7.9 — Remaining Cross-Cutting Decisions
+
+- **MinIO (extends Decision 4.1):** object-key prefix gains a tenant segment: `{tenantSchema}/{designerId}/{fieldKey}/...` (was `{designerId}/{fieldKey}/...`). Bucket stays the single shared `formforge` bucket — isolation is via prefix + presigned URL scoping, consistent with the admin-provisioned-only trust model (no tenant ever receives a presigned URL outside its own prefix, since the schema registry entry that drives serialization is itself tenant-scoped per Decision 7.6).
+- **Rate limiting (extends Decision 2.6):** add a per-tenant sliding-window policy on `/api/data/*` and `/api/admin/*`; partition key becomes `(tenantId, userId)` instead of `userId` alone, so one tenant cannot exhaust the shared instance's quota against another.
+- **Migrations (extends Decision 1.7):** `Database.Migrate()` against `public` is unchanged (it now only owns `tenants`, `platform_admins`, `tenant_user_index`). A new startup step iterates every row in `tenants` and applies the static-schema EF migration set to that tenant's schema (via a scripted `search_path`/target-schema override — EF Core's migration runner is pointed at each schema in turn). New-tenant provisioning (Decision 7.2 step 4) runs the same migration set once, synchronously, at creation time — the startup loop and the provisioning step share one `ApplyTenantMigrationsAsync(schemaName)` method.
+- **CORS (Decision 2.5):** **explicitly unaffected.** JWT-claim tenant routing (not subdomain) means one application origin serves all tenants; the existing single allowed-origins list stands as-is. Recorded here so this was a considered decision, not an oversight.
+
+#### 7.10 — Tenant Isolation Test Gate (new, extends Testing Strategy)
+
+A dedicated tenant-isolation integration test suite is added to `FormForge.Api.Tests` (Testcontainers.PostgreSQL, provisioning 2+ tenants per test run) and treated as a **release gate**, not ordinary coverage: no tenant-scoped epic (2, 3, 4, 5, 6, 8, 9, 10, 11) is considered done until this suite passes. Coverage required:
+- CRUD (Decision 7.7): Tenant A cannot read/write/list a table that exists only in Tenant B's schema; guessed `designerId` → 404, never 403.
+- Dataset Manager (Decision 7.8): Tenant A's `/api/datasets/catalog` never lists Tenant B's tables; a Custom Query authored in Tenant A cannot reference a Tenant B table even if the name is guessed correctly; the `formforge_preview` role cannot read across schemas.
+- MinIO (Decision 7.9): a presigned URL issued to Tenant A never resolves to a Tenant B object key.
+- Admin (Decision 7.4): a tenant-admin in Tenant A cannot list, view, or act on Tenant B's users/roles/menus; a platform-super-admin can create/suspend tenants but cannot read tenant data.
+- Provisioning (Decision 7.2): a failed provisioning run leaves no partially-visible tenant schema reachable by any tenant-scoped request.
+
+This suite runs inside the existing `dotnet test` CI gate (Decision 5.9) — no new pipeline stage.
+
+---
+
 ### Implementation Sequence (Decision Dependencies)
 
+0. **S0.5 (Tenant Foundation) — new, blocks everything below:** Decisions 7.1–7.4 (tenant data model, provisioning service, JWT `tenantId` claim + `ITenantContext`, platform-super-admin/tenant-admin split). Must land before S1, since the JWT shape and role model both change; every sprint from S1 onward now also carries the schema-qualification changes from Decisions 7.5–7.9 layered onto its original decisions.
 1. **S0 (Infrastructure):** Decisions 5.* (Aspire AppHost, Compose, observability, health checks, container, env config).
-2. **S1 (Auth):** Decisions 2.* (JWT flow, password hashing, headers, CORS, rate limit) + 3.1 (error envelope) + 4.7 (httpClient).
+2. **S1 (Auth):** Decisions 2.* (JWT flow, password hashing, headers, CORS, rate limit) + 3.1 (error envelope) + 4.7 (httpClient) + 7.3/7.4 (tenantId claim, tenant-admin seeding).
 3. **S2–S3 (Designer):** Decisions 4.5 (keyboard DnD), 4.10 (DynamicComponent bridge).
 4. **S4 (Menu):** Decisions 3.5 (route groups), 3.4 (pagination shape).
-5. **S5 (Provisioning):** Decisions 1.1–1.7 (identifier sanitization, type mapping, cascade, schema registry, audit indexing, EF/Dapper boundary, migrations).
-6. **S6 (CRUD):** Decisions 3.3 (dynamic validation), 3.6 (re-bind diff), 3.7 (OpenAPI), 3.8 (correlation), 3.9 (idempotency posture), 4.1 (presigned URLs).
+5. **S5 (Provisioning):** Decisions 1.1–1.7 (identifier sanitization, type mapping, cascade, schema registry, audit indexing, EF/Dapper boundary, migrations) + 7.5/7.6/7.7 (tenant-schema-qualified DDL, tenant-aware cache keys, tenant-aware `ProvisioningJob`).
+6. **S6 (CRUD):** Decisions 3.3 (dynamic validation), 3.6 (re-bind diff), 3.7 (OpenAPI), 3.8 (correlation), 3.9 (idempotency posture), 4.1 (presigned URLs) + 7.7 (schema-qualified `DynamicQueryBuilder`) + 7.9 (tenant-segmented MinIO prefixes, tenant-partitioned rate limiting) + 7.10 (tenant-isolation test gate — must pass before S6 is done).
 7. **S7–S8 (UX & polish):** Decisions 4.2 (theme), 4.3 (errors), 4.4 (toasts), 4.6 (folders), 4.8 (i18n), 4.9 (forms).
-8. **S9 (Dataset Foundation):** Decisions 6.1–6.4 (schema + migration + `datasets` schema + view lifecycle + optimistic concurrency) + 6.2 (permission model) + 6.5 (SELECT-only enforcer) + 6.9 (API contract).
-9. **S10 (Query Builder Canvas):** Decisions 6.6 (allowlist/catalog) + 6.12 (React Flow integration); catalog endpoint live; Table Palette, TableNode, JoinEdge, JoinInspector, side-designation all functional.
-10. **S11 (Builder Config):** Decision 6.11 (`builder_state` contract) + 6.10 (SQL generator, incl. column selection, aggregates, GROUP BY, CASE, calculated columns, filter groups, ORDER BY); `builder_state` persisted and restored.
-11. **S12 (SQL Gen, Preview & Sync):** Decision 6.7 (preview pool + `formforge_preview` role) + 6.8 (expression security) + preview endpoint live; builder-mode save reuses view lifecycle; builder_state + query always in sync.
+8. **S9 (Dataset Foundation):** Decisions 6.1–6.4 (schema + migration + `datasets` schema + view lifecycle + optimistic concurrency) + 6.2 (permission model) + 6.5 (SELECT-only enforcer) + 6.9 (API contract) + 7.8 (per-tenant `datasets` schema, tenant-scoped allowlist and preview-role grants).
+9. **S10 (Query Builder Canvas):** Decisions 6.6 (allowlist/catalog) + 6.12 (React Flow integration) + 7.8 (tenant-scoped catalog discovery); catalog endpoint live; Table Palette, TableNode, JoinEdge, JoinInspector, side-designation all functional.
+10. **S11 (Builder Config):** Decision 6.11 (`builder_state` contract) + 6.10 (SQL generator, incl. column selection, aggregates, GROUP BY, CASE, calculated columns, filter groups, ORDER BY) + 7.8 (server-side tenant schema injection into generated FROM clauses); `builder_state` persisted and restored.
+11. **S12 (SQL Gen, Preview & Sync):** Decision 6.7 (preview pool + `formforge_preview` role) + 6.8 (expression security) + 7.8/7.10 (tenant-scoped preview role, tenant-isolation test gate) + preview endpoint live; builder-mode save reuses view lifecycle; builder_state + query always in sync.
 
 ### Cross-Component Dependencies
 
@@ -1077,6 +1199,13 @@ Follows the tuple convention (Implementation Patterns — Communication Patterns
   - Correlation ID (3.8) propagated into `dataset_audit_log.correlation_id` (6.1) and Dapper SQL comments for preview queries.
   - Error envelope (3.1) extended with new Dataset error codes (6.9); all codes follow the same `ProblemDetails` shape.
   - Pagination shape (3.4) reused for `GET /api/datasets` and audit log endpoints (6.9).
+- **Multi-tenant cross-component dependencies:**
+  - `ITenantContext` (7.3) is the new single source of truth for the ambient tenant schema — consumed by `SchemaRegistry` (1.4/7.6), `DynamicQueryBuilder`/`DdlEmitter` (1.6/7.7), `DatasetAllowlist`/`DatasetSqlGenerator`/`PreviewConnectionFactory` (6.6/6.7/6.10/7.8), and the MinIO prefix builder (4.1/7.9).
+  - `SafeIdentifier` (1.1) reused unchanged for `tenants.schema_name` validation (7.1/7.5) — no new validator class.
+  - `ICacheStore` (5.1) hosts the tenant lookup cache (7.3) alongside the now-tenant-keyed schema registry, permission, and dataset-catalog caches (7.6) — the v2 Redis swap covers all of these automatically.
+  - `EffectivePermissions` (2.2) gains `TenantId` (7.6); the platform-super-admin tier (7.4) bypasses `EffectivePermissions` entirely (it is not a tenant role) and is checked via a separate `RequirePlatformSuperAdmin()` filter.
+  - `IProvisioningService`/`ProvisioningRecoveryService` (1.6) pattern is mirrored by `ITenantProvisioningService`/`TenantProvisioningRecoveryService` (7.2) rather than extended in place, since tenant provisioning is synchronous while table provisioning stays async.
+  - Correlation ID (3.8) propagates `tenantId` into every log scope and audit row alongside `userId`.
 
 ## Implementation Patterns & Consistency Rules
 
@@ -1093,6 +1222,7 @@ Six categories of patterns are defined below to prevent divergent choices across
 - Indexes: `idx_{table}_{columns_joined_by_underscore}` (matches FR-27 AC-3).
 - Constraints: `pk_{table}`, `fk_{table}_{referenced}`, `uq_{table}_{columns}`, `ck_{table}_{rule}`.
 - Audit tables: `schema_audit_log`, `mutation_audit_log` (per PRD).
+- **Tenant schemas (Decision 7.1):** `tenant_{slug}` — same `SafeIdentifier` regex as any other identifier; the schema name, not a column, is the tenant boundary. Per-tenant Dataset VIEW namespace: `{tenant_schema}_datasets` (Decision 7.8).
 
 **API endpoints:**
 - Plural nouns for collections: `/api/users`, `/api/roles`, `/api/menus`, `/api/designers`. Exception: `/api/data/{designerId}` (designerId IS the user-authored collection name).
@@ -1143,6 +1273,7 @@ src/
 │   │   ├── Roles/
 │   │   ├── Designers/
 │   │   ├── Menus/
+│   │   ├── Tenancy/               # tenants, ITenantContext, ITenantProvisioningService, platform_admins (Decisions 7.1-7.4)
 │   │   ├── Provisioning/          # IProvisioningService, ProvisioningBackgroundService, DDL emitter
 │   │   ├── Permissions/           # PermissionService, EffectivePermissionsCache
 │   │   ├── SchemaRegistry/        # ISchemaRegistry, ColumnDefinition, etc.
@@ -1662,12 +1793,57 @@ Feature folder (`features/datasets/`):
 
 ---
 
+### Project Structure Additions — Multi-Tenant Architecture
+
+**Backend additions to `src/FormForge.Api/`:**
+
+`Domain/Entities/`:
+- `Tenant.cs` — EF entity for `tenants` table (Decision 7.1)
+- `PlatformAdmin.cs` — EF entity for `platform_admins` table (Decision 7.4)
+- `TenantUserIndexEntry.cs` — EF entity for `tenant_user_index` table (Decision 7.3)
+
+`Features/Tenancy/`:
+- `TenantEndpoints.cs` — `/api/admin/tenants/*` route handlers (platform-super-admin only, Decision 7.4)
+- `TenantProvisioningService.cs` — `ITenantProvisioningService`, the CREATE SCHEMA + migrate + seed sequence (Decision 7.2)
+- `TenantProvisioningRecoveryService.cs` — startup recovery for stuck `Provisioning` rows (Decision 7.2)
+- `TenantContext.cs` — `ITenantContext` request-scoped service + middleware (Decision 7.3)
+- `TenantLookupService.cs` — email → tenant resolution via `tenant_user_index` at login (Decision 7.3)
+- `Validators/TenantSchemaNameValidator.cs` — reuses `SafeIdentifier` (Decision 7.5)
+- `Dtos/TenantDto.cs`, `CreateTenantRequest.cs`
+- `Events/TenantProvisioned.cs`, `TenantSuspended.cs`
+
+**Modified (not new) across existing features**, per Decisions 7.6/7.7/7.8/7.9:
+- `Features/SchemaRegistry/SchemaRegistry.cs` — cache key gains `tenantId`
+- `Features/Permissions/PermissionService.cs` — cache key gains `tenantId`; `EffectivePermissions` gains `TenantId`
+- `Features/Provisioning/DdlEmitter.cs`, `Features/DynamicCrud/DynamicQueryBuilder.cs`, `SoftDeleteCascade.cs`, `RepeaterWriteCoordinator.cs` — schema-qualify every table reference via `ITenantContext`
+- `Features/Datasets/DatasetAllowlist.cs`, `DatasetSqlGenerator.cs`, `Infrastructure/Datasets/PreviewConnectionFactory.cs` — tenant-scoped catalog discovery, generated SQL, and preview-role grants
+- `Features/Files/*` (MinIO) — object-key prefix builder gains a tenant segment
+- `Program.cs` — rate-limit partition keys gain `tenantId`; startup migration loop iterates all tenant schemas; bootstrap seeds `platform_admins` instead of a global `platform-admin` role
+
+**Test additions to `src/FormForge.Api.Tests/Features/Tenancy/`:**
+- `TenantProvisioningServiceTests.cs` — integration (Testcontainers): schema created, migrations applied, tenant-admin seeded, rollback on mid-sequence failure leaves no partially-visible schema
+- `TenantIsolationTests.cs` — the release-gate suite from Decision 7.10: cross-tenant CRUD, Dataset, MinIO, and admin isolation, run with 2+ provisioned tenants per test
+
+**Frontend additions to `web/src/`:**
+
+Routes (`routes/_app/admin/`):
+- `tenants.tsx` — minimal Tenants list + create page, visible only to platform-super-admins (Decision 7.4)
+
+**New dependencies:** none — multi-tenancy is implemented entirely with the existing stack (EF Core, Dapper, Npgsql schema-qualified SQL); no new NuGet or npm packages required.
+
+---
+
 ### Architectural Boundaries
 
 **API boundary (external):**
 - All HTTP enters via `FormForge.Api`. Public surface: `/api/*`, `/openapi/v1.json`, `/health/*`, SPA fallback at `/`.
 - Auth boundary: `RequireAuth()` filter on every group except `/api/auth/*`, `/openapi/*`, `/health/live`, `/health/ready`.
 - Admin boundary: `RequirePlatformAdmin()` on `/api/admin/*`.
+
+**Tenant boundary (Decisions 7.1–7.9):**
+- Every tenant's static and dynamic data lives in its own PostgreSQL schema; `public` holds only `tenants`, `platform_admins`, and `tenant_user_index`.
+- `ITenantContext`, populated by tenant-context middleware immediately after `CorrelationIdMiddleware` and before `RequireAuth`, is the single source of truth for which schema a request may touch — no feature resolves a tenant schema any other way.
+- Platform-super-admin (`platform_admins`) and tenant-admin (a per-tenant role) are distinct boundaries: a platform-super-admin can manage the `tenants` table but has no implicit grant into any tenant schema.
 
 **Static schema vs dynamic schema boundary:**
 - `FormForge.Api/Infrastructure/Persistence/FormForgeDbContext.cs` — EF Core; static tables only.
@@ -1701,6 +1877,7 @@ Feature folder (`features/datasets/`):
 | **I — Query Builder Canvas & Joins (FR-63..66)** | `Features/Datasets/DatasetAllowlist.cs` (catalog endpoint), `web/src/components/query-builder/{TableNode,JoinEdge,JoinInspector}.tsx`, `features/datasets/{QueryBuilderCanvas,TablePalette}.tsx` |
 | **J — Builder Config (FR-67..69)** | `Features/Datasets/DatasetSqlGenerator.cs` (column selection, aggregates, GROUP BY, CASE, calculated, filter groups, ORDER BY), `Features/Datasets/ExpressionSecurityValidator.cs`, `features/datasets/{FilterConditionsDialog,OrderByPanel}.tsx` |
 | **K — SQL Generation, Preview & View Sync (FR-70..73)** | `Features/Datasets/{DatasetSqlGenerator,PreviewService,SqlSelectEnforcer,DatasetViewManager}.cs`, `Infrastructure/Datasets/PreviewConnectionFactory.cs`, `features/datasets/useDatasetPreview.ts`, `features/datasets/types/builderState.ts` |
+| **T — Tenant Foundation & Provisioning (new, Decisions 7.1–7.10)** | `Features/Tenancy/*`, `Domain/Entities/{Tenant,PlatformAdmin,TenantUserIndexEntry}.cs`, `web/src/routes/_app/admin/tenants.tsx`, `FormForge.Api.Tests/Features/Tenancy/*` |
 
 ### Integration Points
 
@@ -1717,8 +1894,8 @@ Feature folder (`features/datasets/`):
 
 **Representative data flow (record create):**
 1. SPA: `useDynamicFormMutation` → `httpClient.post('/api/data/incident_report', payload)`.
-2. API: `CorrelationIdMiddleware` → `RateLimiter` → `RequireAuth` → `RequirePermission('create')` → `ValidationFilter` (Layer 1) → handler.
-3. Handler: resolves schema registry; `DynamicPayloadValidator` Layer 2; `DynamicQueryBuilder` emits parameterized INSERT via Dapper; transaction wraps parent + Repeater children; mutation audit row inserted (EF) in same transaction.
+2. API: `CorrelationIdMiddleware` → `ITenantContext` middleware (resolves tenant schema from the JWT `tenantId` claim — Decision 7.3) → `RateLimiter` (tenant-partitioned — Decision 7.9) → `RequireAuth` → `RequirePermission('create')` → `ValidationFilter` (Layer 1) → handler.
+3. Handler: resolves schema registry (tenant-keyed — Decision 7.6); `DynamicPayloadValidator` Layer 2; `DynamicQueryBuilder` emits parameterized INSERT, schema-qualified against `ITenantContext.SchemaName` (Decision 7.7), via Dapper; transaction wraps parent + Repeater children; mutation audit row inserted (EF, into the tenant's own schema) in same transaction.
 4. Response: 201 with serialized record (Option C JSON casing). `X-Correlation-ID` header.
 5. SPA: TanStack Query invalidates `['data', 'incident_report']` keys; record list re-fetches.
 
@@ -1733,7 +1910,9 @@ Feature folder (`features/datasets/`):
 
 ### Coherence Validation ✅
 
-**Decision Compatibility:** All 51 Core Architectural Decisions interlock cleanly.
+**Decision Compatibility:** All 74 Core Architectural Decisions interlock cleanly.
+- Schema-per-tenant isolation (7.1–7.9) integrates with the EF/Dapper separated-transaction model (1.6) without changing its shape — both engines now target a request-scoped schema via `ITenantContext` instead of a hardcoded `public`, but the boundary between them (`FormForgeDbContext` for static, `DbConnectionFactory` for dynamic) is unchanged.
+- The v1 single-process invariant (in-memory caches, Decision 5.1) extends cleanly to multi-tenancy: tenant-keyed cache entries (7.6) still live in one process's `ICacheStore`; the v2 Redis swap remains a single binding change.
 - TanStack Router + TanStack Query integrated via `ensureQueryData` in route loaders.
 - EF Core + Dapper on shared PG instance with separated transactions (Decision 1.6).
 - In-memory caches + single API instance + single-origin SPA hosting all hang on the v1 single-process invariant; v2 horizontal scaling triggers a coordinated Redis swap via `ICacheStore`.
@@ -1761,6 +1940,7 @@ All 73 FRs map to specific files/folders in the project structure (see Requireme
 | FR-63..66 (Query Builder Canvas) | `Features/Datasets/DatasetAllowlist` + `components/query-builder/*` + `features/datasets/TablePalette` | ✅ |
 | FR-67..69 (Builder Config) | `Features/Datasets/DatasetSqlGenerator` + `ExpressionSecurityValidator` + `features/datasets/FilterConditionsDialog + OrderByPanel` | ✅ |
 | FR-70..73 (SQL Gen, Preview & Sync) | `DatasetSqlGenerator` + `PreviewService` + `SqlSelectEnforcer` + `DatasetViewManager` + `PreviewConnectionFactory` | ✅ |
+| Multi-Tenant Architecture (new, Decisions 7.1–7.10; PRD amendment pending — see Sprint Change Proposal 2026-09-08) | `Features/Tenancy/*` + tenant-schema qualification across `Features/{Provisioning,SchemaRegistry,DynamicCrud,Datasets,Permissions}/` | ⏳ Architecture ready; PRD/epic/story amendments in progress per handoff plan |
 
 **NFR coverage:** performance (caches, indexes, query timeout, p95 targets), security (Decisions 2.1–2.8), auditability (EF-managed append-only logs), reliability (transactional DDL with rollback + provisioning recovery), browser support (Vite ES2022 target + browserslist), i18n (architecture-ready, en-only).
 
@@ -1797,9 +1977,17 @@ All 73 FRs map to specific files/folders in the project structure (see Requireme
 | R-16 Allowlist bypass via crafted builder_state | Server validates all `node.tableName` values against allowlist cache before SQL generation (Decision 6.6); client palette filtering is UX only |
 | R-17 VIEW and row divergence on partial failure | All row writes + VIEW DDL in single PostgreSQL transaction (Decision 6.3); PG DDL is fully transactional; integration tests cover rollback scenarios |
 
+**Multi-Tenant risks R-18 through R-20 added by Sprint Change Proposal 2026-09-08:**
+
+| Risk | Mitigation |
+|---|---|
+| R-18 Cross-tenant data leak via Dataset Custom Query or Query Builder | Structural, not conventional: allowlist/catalog discovery, `formforge_preview` role grants, and generated `FROM` clauses are all scoped to the caller's tenant schema server-side (Decision 7.8); a tenant cannot even enumerate another tenant's table names. Tenant-isolation test gate (Decision 7.10) is a release blocker for Epics 8–11. |
+| R-19 Cross-tenant data leak via guessed `designerId` in Generic CRUD | Every dynamic SQL call site schema-qualifies against `ITenantContext` (Decision 7.7), not a `tenant_id` predicate that could be omitted; a request for a table that exists only in another tenant's schema 404s (`TABLE_NOT_PROVISIONED`) rather than confirming/denying existence. |
+| R-20 Partial tenant-provisioning failure leaves an inconsistent or partially-visible schema | `ITenantProvisioningService` runs schema creation, migration, and seeding as a defined sequence with `status='Provisioning'` until the final step succeeds (Decision 7.2); `TenantProvisioningRecoveryService` scans stuck rows on startup and flags (does not silently retry) partial DDL. |
+
 ### Implementation Readiness Validation ✅
 
-**Decision Completeness:** 64 decisions documented (51 original + 13 Dataset Manager); all critical decisions versioned (.NET 10 LTS, Aspire 13.1, React 19, Vite 7, PG 17, @xyflow/react v12, PgQuery.NET).
+**Decision Completeness:** 74 decisions documented (51 original + 13 Dataset Manager + 10 Multi-Tenant); all critical decisions versioned (.NET 10 LTS, Aspire 13.1, React 19, Vite 7, PG 17, @xyflow/react v12, PgQuery.NET).
 
 **Structure Completeness:** Complete project tree (backend + frontend) with file-level paths.
 
@@ -1863,6 +2051,24 @@ FR count updated 53 → 54. Decision count updated 49 → 51. No new entities (m
 
 FR count updated 54 → 73. Decision count updated 51 → 64. Sprints S9–S12 added. All PRD handoff items AD-14–AD-19 resolved. Risk register extended with R-14–R-17. Project structure additions documented separately.
 
+**Sprint Change Proposal — 2026-09-08 (Multi-Tenant Architecture):** Architecture extended to reverse the locked single-tenant decision (formerly PRD Decision Log #3 / Non-Goal A10 / NFR-15), per the approved Sprint Change Proposal (`_bmad-output/planning-artifacts/sprint-change-proposal-2026-09-08.md`). Decisions added:
+- **7.1** Tenant data model & schema-per-tenant isolation (`tenants` table; every previously-global table moves into a per-tenant schema).
+- **7.2** Tenant provisioning service (synchronous CREATE SCHEMA + migrate + seed; `TenantProvisioningRecoveryService` for stuck runs).
+- **7.3** Tenant identification & request-scoped context (JWT `tenantId` claim; `ITenantContext` middleware; `tenant_user_index` for login lookup).
+- **7.4** Platform-super-admin vs. tenant-admin role split (`platform_admins` table, separate from any tenant's `users`).
+- **7.5** Identifier sanitization extended to tenant schema names (reuses `SafeIdentifier` unchanged).
+- **7.6** Cache keys extended with tenant dimension (schema registry, permission cache, dataset allowlist).
+- **7.7** Dynamic provisioning & CRUD schema qualification — explicitly **not** a `tenant_id`-column/predicate approach; isolation is structural via the schema qualifier.
+- **7.8** Dataset Manager multi-tenant isolation (per-tenant `datasets` schema, tenant-scoped allowlist/catalog, tenant-scoped `formforge_preview` grants, server-injected schema in generated SQL) — closes a real leak vector identified during impact analysis, not a mechanical pass.
+- **7.9** Remaining cross-cutting changes (MinIO prefix, per-tenant rate-limit partitioning, migration fan-out across tenant schemas); CORS explicitly confirmed unaffected (JWT-claim routing, not subdomain).
+- **7.10** Tenant isolation test gate — a dedicated Testcontainers suite treated as a release blocker for every tenant-scoped epic.
+
+**Isolation model decision:** schema-per-tenant was selected over shared-tables + `tenant_id` after evaluating both against this codebase's actual dynamic-SQL surface (see proposal §2.3) — the deciding factor was that Custom Query Mode (FR-60) gives trusted users raw SQL authorship with no mechanism to enforce a per-query tenant filter, whereas schema-per-tenant enforces isolation at the PostgreSQL grant/schema level regardless of the SQL a tenant's own users author.
+
+**Scope bounded per the proposal's hybrid path-forward (Direct Adjustment + PRD MVP Review):** tenant routing is JWT-claim-based (not subdomain) and onboarding is admin-provisioned only; self-service signup, custom domains, and billing/plan tiers are new PRD non-goals, not architected in this phase.
+
+FR count: PRD amendment pending (PM handoff, proposal §5) — no new FRs numbered here; the new capability is tracked as architecture Decisions 7.1–7.10 plus a new Tenant Foundation & Provisioning epic (proposal §4.2) awaiting formal epic/story breakdown. Decision count updated 64 → 74. Risk register extended with R-18–R-20. Project structure additions documented separately. **This entry records the architecture side of the change; `bmad-prd` and `bmad-create-epics-and-stories` still need to run per the proposal's handoff plan to bring the PRD and epics.md into sync with these decisions.**
+
 ### Architecture Completeness Checklist
 
 **Requirements Analysis**
@@ -1872,7 +2078,7 @@ FR count updated 54 → 73. Decision count updated 51 → 64. Sprints S9–S12 a
 - [x] Cross-cutting concerns mapped (12 concerns)
 
 **Architectural Decisions**
-- [x] Critical decisions documented with versions (64 decisions; all 19 PRD handoffs resolved; versions pinned)
+- [x] Critical decisions documented with versions (74 decisions; all 19 PRD handoffs resolved; versions pinned; Decisions 7.1–7.10 cover multi-tenancy, PRD/epic amendment pending per handoff plan)
 - [x] Technology stack fully specified
 - [x] Integration patterns defined (EF/Dapper boundary, event bus, BackgroundService, presigned URLs, single-origin SPA)
 - [x] Performance considerations addressed (caches, indexes, p95 targets, query timeout, async DDL)
@@ -1891,7 +2097,7 @@ FR count updated 54 → 73. Decision count updated 51 → 64. Sprints S9–S12 a
 
 ### Architecture Readiness Assessment
 
-**Overall Status:** **READY FOR IMPLEMENTATION** — all 16 checklist items checked; no critical gaps; four important gaps inline-resolved within the architecture document; five minor gaps tracked as implementation-phase responsibilities. Dataset Manager addendum (Epics H–K, FR-55..73, Decisions 6.1–6.13) fully integrated.
+**Overall Status:** **READY FOR IMPLEMENTATION** — all 16 checklist items checked; no critical gaps; four important gaps inline-resolved within the architecture document; five minor gaps tracked as implementation-phase responsibilities. Dataset Manager addendum (Epics H–K, FR-55..73, Decisions 6.1–6.13) fully integrated. **Multi-Tenant Architecture addendum (Decisions 7.1–7.10) is architecturally complete and internally consistent; it is NOT yet reflected in the PRD or epics.md** — those amendments are the next handoff step (`bmad-prd`, then `bmad-create-epics-and-stories`) per the Sprint Change Proposal, and implementation should not begin against Decisions 7.x until that breakdown exists.
 
 **Confidence Level:** **High** — the PRD was unusually thorough (locked stack, 11 explicit handoff items, complete risk register, dependency graph, sprint plan). The architecture extends that rigor rather than papering over gaps.
 
@@ -1913,7 +2119,7 @@ FR count updated 54 → 73. Decision count updated 51 → 64. Sprints S9–S12 a
 ### Implementation Handoff
 
 **AI Agent Guidelines:**
-- Follow all 64 Core Architectural Decisions exactly as documented (Decisions 1.x–5.x for the core platform; Decisions 6.1–6.13 for the Dataset Manager).
+- Follow all 74 Core Architectural Decisions exactly as documented (Decisions 1.x–5.x for the core platform; Decisions 6.1–6.13 for the Dataset Manager; Decisions 7.1–7.10 for Multi-Tenant Architecture — do not begin implementing against 7.x until the corresponding PRD and epic/story amendments exist, per the Sprint Change Proposal handoff plan).
 - Use Implementation Patterns consistently across all features (especially `SafeIdentifier`, `httpClient`, structured logging templates, TanStack Query key tuples).
 - Respect the project structure and boundaries — especially static-vs-dynamic schema separation and the import-direction rules.
 - The Requirements-to-Structure table is authoritative — start each story by locating its target folder.
@@ -1926,16 +2132,17 @@ Story G-1.1 (prepended to Sprint S0): run the initialization command sequence fr
 
 | Sprint | Stories | Exit Criteria |
 |---|---|---|
+| **S0.5 — Tenant Foundation (new, blocks S1 onward)** | T-1..T-6 (proposal §4.2) | `tenants` table + provisioning service create an isolated schema, migrate it, and seed a tenant-admin; JWT carries `tenantId`; `ITenantContext` resolves the schema for every request; platform-super-admin tier exists separately from tenant-admin |
 | S0 — Infrastructure | G-1.1 (new), G-1, G-5, G-2, G-3, G-4 | `dotnet run` starts all services; `/health` healthy; Swagger accessible; structured logs visible |
 | S1 — Auth | A-1..A-9, A-10..A-13 | Login/logout work; roles assignable; permission enforcement; admin UI functional; welcome email; forgot/reset password; password change; TOTP MFA enrolment + two-step login flow |
 | S2 — Designer Port | B-1 | Ported designer renders; all 14 component types; DynamicComponent renders forms |
 | S3 — Designer Features | B-2..B-10, B-11 (new keyboard a11y), D-1 | Full designer workflow; library page; lifecycle management; component mode (CRUD/VIEW) set at creation and enforced; keyboard DnD passes axe-core |
 | S4 — Menu | C-1, C-2, C-4..C-8 | Menus created, reordered, role-assigned; navbar permission-filtered |
-| S5 — Table Provisioning | C-3, D-2..D-6 + ProvisioningRecoveryService | Schema bindings provision; additive ALTER; Repeater FK; drift view; audit log |
-| S6 — CRUD API | E-1..E-8 | All CRUD endpoints permission-gated; soft-delete cascade; nested Repeater writes; mutation audit |
+| S5 — Table Provisioning | C-3, D-2..D-6 + ProvisioningRecoveryService | Schema bindings provision; additive ALTER; Repeater FK; drift view; audit log; all DDL is schema-qualified per the active tenant (Decision 7.7) |
+| S6 — CRUD API | E-1..E-8 | All CRUD endpoints permission-gated; soft-delete cascade; nested Repeater writes; mutation audit; **tenant-isolation test suite (Decision 7.10) passes** — cross-tenant reads/writes fail closed |
 | S7 — Data Entry UI | F-4..F-6 | Content Editor flows; record list paginated/filterable/sortable; all UI states |
 | S8 — Polish & Cross-Cutting | F-1..F-3, F-7..F-8, G-6 | Mobile layout; theming; WCAG audit passes; admin pages complete; i18n externalized |
-| S9 — Dataset Foundation | H-1, H-2, H-3, H-4, H-5, H-6, H-7, H-8, H-9, H-10 | `custom_dataset` migration + `datasets` schema; `dataset-management` permission enforced; full CRUD API with transactional view lifecycle; name validation; Custom Query Mode with SELECT enforcement; Dataset Management UI functional; audit log populated |
+| S9 — Dataset Foundation | H-1, H-2, H-3, H-4, H-5, H-6, H-7, H-8, H-9, H-10 | `custom_dataset` migration + `datasets` schema (provisioned per-tenant, Decision 7.8); `dataset-management` permission enforced; full CRUD API with transactional view lifecycle; name validation; Custom Query Mode with SELECT enforcement; Dataset Management UI functional; audit log populated; **tenant-scoped table allowlist verified — a tenant cannot enumerate another tenant's tables** |
 | S10 — Query Builder Canvas | I-1, I-2, I-3, I-4, I-5 | Table Palette shows allowlisted tables; multi-table drag works; column-to-column join edges; Join Inspector configures type; left/right designation controls FROM anchor |
 | S11 — Builder Config | J-1, J-2, J-3, J-4, J-5, J-6, J-7, J-8 | Column checkboxes control SELECT; aggregates + GROUP BY correct; CASE + calculated columns generate valid SQL; Filter dialog with nested groups; parameterized values confirmed; ORDER BY in declared order |
-| S12 — SQL Gen, Preview & Sync | K-1, K-2, K-3, K-4 | Server generator produces correct SQL from builder_state; canvas restores exactly on reopen; Preview returns ≤10 rows with timeout; builder-mode save reuses transactional view lifecycle |
+| S12 — SQL Gen, Preview & Sync | K-1, K-2, K-3, K-4 | Server generator produces correct SQL from builder_state, with the tenant schema injected server-side (Decision 7.8); canvas restores exactly on reopen; Preview returns ≤10 rows with timeout via the tenant-scoped `formforge_preview` role; builder-mode save reuses transactional view lifecycle; **full tenant-isolation test suite (Decision 7.10) passes as the release gate for Epics 8–11** |

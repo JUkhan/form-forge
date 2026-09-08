@@ -1,5 +1,5 @@
 # generated: 2026-05-22
-# last_updated: 2026-09-08 (story 12-2 tenant-schema-provisioning implemented, reviewed, and patched — review)
+# last_updated: 2026-09-08 (story 12-7 tenant-onboarding-activation implemented, reviewed, and patched — review)
 # project: tinnitus
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-22'
-last_updated: 09-08-2026 12:20
+last_updated: 09-08-2026 15:40
 project: FormForge (tinnitus)
 project_key: NOKEY
 tracking_system: file-system
@@ -174,5 +174,5 @@ development_status:
   12-4-platform-super-admin-bootstrap: backlog
   12-5-tenants-admin-page: backlog
   12-6-tenant-context-middleware-integration: backlog
-  12-7-tenant-onboarding-activation: backlog
+  12-7-tenant-onboarding-activation: review
   epic-12-retrospective: optional

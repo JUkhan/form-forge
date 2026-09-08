@@ -225,6 +225,14 @@ builder.Services.AddScoped<CycleDetector>();
 // collision pre-check; the migration replay opens its own dedicated connection/DbContext
 // instance internally. No HTTP surface yet — Story 12.5 consumes this service later.
 builder.Services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
+// Story 12.7 (FR-75 / Decision 7.7) — the second, independently callable onboarding step
+// that finishes what Story 12.2 deliberately leaves undone. Scoped for the same reason as
+// ITenantProvisioningService above; its own schema-scoped DDL/EF work opens dedicated
+// connections internally. No HTTP surface yet — Story 12.5 consumes this service later.
+builder.Services.AddScoped<ITenantOnboardingService, TenantOnboardingService>();
+// Startup-scan flag-only recovery for tenants stuck at Status == "Provisioning" (FR-75
+// AC-3) — mirrors ProvisioningRecoveryService's shape but never retries or mutates state.
+builder.Services.AddHostedService<TenantProvisioningRecoveryService>();
 
 // Menu services (Story 4.1)
 builder.Services.AddScoped<IMenuService, MenuService>();

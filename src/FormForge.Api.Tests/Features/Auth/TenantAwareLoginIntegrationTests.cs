@@ -48,7 +48,7 @@ public sealed class TenantAwareLoginIntegrationTests : IClassFixture<PostgresFix
         // users (FK) — CASCADE also sweeps any leftover rows in dependent tables not
         // listed explicitly, same pattern as AuthIntegrationTests.
         await db.Database.ExecuteSqlRawAsync(
-            "TRUNCATE TABLE tenant_user_index, tenants, refresh_tokens, users RESTART IDENTITY CASCADE;");
+            "TRUNCATE TABLE tenant_user_index, tenants, refresh_tokens, users, platform_admins RESTART IDENTITY CASCADE;");
 
         _client = _factory.CreateClient(new WebApplicationFactoryClientOptions
         {

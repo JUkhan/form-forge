@@ -127,7 +127,47 @@ internal sealed partial class AuthService(
         // miss the unique-index match and surface as INVALID_CREDENTIALS.
         var normalizedEmail = email.Trim().ToLowerInvariant();
 
-        // Story 12.3 — tenant_user_index is checked first. A match means this email
+        // Story 12.4 — platform_admins is checked before tenant_user_index (a platform
+        // admin is never also a tenant user, so lookup order has no behavioral effect
+        // beyond being deliberate — see this story's Design Notes). A match is always
+        // terminal: right password issues an access-token-only response (no refresh-token
+        // row is ever written for this tier — the access-token-only decision), wrong
+        // password returns InvalidCredentials via the same constant-time BCrypt compare
+        // used everywhere else (no _dummyPasswordHash needed here — a match guarantees a
+        // real hash to compare against, same as the tenant-schema-user-found branch in
+        // LoginAgainstTenantSchemaAsync below). No match falls through unchanged to the
+        // tenant_user_index check, so that branch's own dummy-hash guard keeps the overall
+        // per-request BCrypt budget uniform across every outcome.
+        var platformAdmin = await db.PlatformAdmins
+            .AsNoTracking()
+            .FirstOrDefaultAsync(p => p.UserEmail == normalizedEmail, ct)
+            .ConfigureAwait(false);
+
+        if (platformAdmin is not null)
+        {
+            if (!passwordHasher.Verify(password, platformAdmin.PasswordHash))
+            {
+                return new AuthServiceResult(AuthLoginOutcome.InvalidCredentials);
+            }
+
+            var accessToken = jwtTokenService.CreateAccessTokenForPlatformAdmin(platformAdmin.Id, platformAdmin.UserEmail);
+            var ttlSeconds = jwtOptions.Value.AccessTokenTtlMinutes * 60;
+
+            var response = new LoginResponse(
+                AccessToken: accessToken,
+                RefreshToken: null,
+                ExpiresIn: ttlSeconds,
+                User: new AuthenticatedUser(
+                    UserId: platformAdmin.Id,
+                    Email: platformAdmin.UserEmail,
+                    DisplayName: platformAdmin.UserEmail,
+                    ThemePreference: null,
+                    Roles: ["platform-super-admin"]));
+
+            return new AuthServiceResult(AuthLoginOutcome.Success, response);
+        }
+
+        // Story 12.3 — tenant_user_index is checked next. A match means this email
         // belongs to a tenant-schema user, so the credential check must run against
         // that tenant's own `users` table instead of public.users. This is additive,
         // not a hard cutover: no match falls through unchanged to the pre-12.3 path

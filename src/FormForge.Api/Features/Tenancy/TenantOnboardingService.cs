@@ -204,6 +204,22 @@ internal sealed partial class TenantOnboardingService(
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Tenant '{tenant.Id}' was not found.");
 
+        // Review fix — a tenant's first-user email must never collide with an existing
+        // public.platform_admins row (most plausibly the hardcoded bootstrap
+        // admin@formforge.local): AuthService.LoginAsync treats a platform_admins match
+        // as unconditionally terminal, so a silent collision here would permanently lock
+        // that tenant admin out of login (or misroute them into the platform-super-admin
+        // tier by password coincidence). Fail loudly instead of proceeding.
+        var platformAdminCollision = await db.PlatformAdmins
+            .AsNoTracking()
+            .AnyAsync(p => p.UserEmail == adminUser.Email, ct)
+            .ConfigureAwait(false);
+        if (platformAdminCollision)
+        {
+            throw new InvalidOperationException(
+                $"Cannot onboard tenant '{tenant.Id}': email '{adminUser.Email}' is already registered as a platform-super-admin.");
+        }
+
         db.TenantUserIndex.Add(new TenantUserIndexEntry
         {
             Email = adminUser.Email,

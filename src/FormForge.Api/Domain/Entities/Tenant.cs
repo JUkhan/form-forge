@@ -13,7 +13,7 @@ internal sealed class Tenant
     public string Status { get; set; } = "Provisioning";
     public DateTimeOffset CreatedAt { get; set; }
 
-    // No FK yet: platform_admins (Story 12.4) does not exist until a later story in
-    // this epic. Story 12.4 adds the constraint once the referenced table is real.
+    // FK to platform_admins.id (Story 12.4), configured in FormForgeDbContext with no
+    // navigation property — SetNull on delete, same posture as DatasetAuditLogEntry.ActorId.
     public Guid? CreatedBy { get; set; }
 }

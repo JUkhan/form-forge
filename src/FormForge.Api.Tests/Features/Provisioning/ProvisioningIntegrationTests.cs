@@ -46,7 +46,7 @@ public sealed class ProvisioningIntegrationTests : IClassFixture<PostgresFixture
         // so we truncate menus FIRST. component_schema_versions cascades from component_schemas, but
         // we name it explicitly so the truncate is order-deterministic across PG versions.
         await db.Database.ExecuteSqlRawAsync(
-            "TRUNCATE TABLE menu_role_assignments, menus, component_schema_versions, component_schemas, role_permissions, user_roles, roles, refresh_tokens, users, schema_audit_log, tenants, tenant_user_index RESTART IDENTITY CASCADE;");
+            "TRUNCATE TABLE menu_role_assignments, menus, component_schema_versions, component_schemas, role_permissions, user_roles, roles, refresh_tokens, users, schema_audit_log, tenants, tenant_user_index, platform_admins RESTART IDENTITY CASCADE;");
 
         // Drop any dynamically-provisioned tables from previous test runs. These tables
         // live outside the static EF schema and the TRUNCATE above does not reach them.
@@ -60,7 +60,7 @@ public sealed class ProvisioningIntegrationTests : IClassFixture<PostgresFixture
                     SELECT tablename FROM pg_tables
                     WHERE schemaname = 'public'
                       AND tablename NOT IN (
-                          'users', 'refresh_tokens', 'roles', 'role_permissions', 'user_roles', 'tenants', 'tenant_user_index',
+                          'users', 'refresh_tokens', 'roles', 'role_permissions', 'user_roles', 'tenants', 'tenant_user_index', 'platform_admins',
                           'component_schemas', 'component_schema_versions',
                           'menus', 'menu_role_assignments',
                           'schema_audit_log',

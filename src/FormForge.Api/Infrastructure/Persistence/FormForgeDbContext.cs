@@ -27,6 +27,7 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
     public DbSet<DatasetAuditLogEntry> DatasetAuditLog => Set<DatasetAuditLogEntry>();
     public DbSet<Tenant> Tenants => Set<Tenant>();
     public DbSet<TenantUserIndexEntry> TenantUserIndex => Set<TenantUserIndexEntry>();
+    public DbSet<PlatformAdmin> PlatformAdmins => Set<PlatformAdmin>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -434,8 +435,8 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
         // Story 12.1 (FR-74 / Decision 7.1) — tenants is the one table that stays in
         // `public`; schema_name uniqueness/format is enforced by the unique index here
         // at the DB layer, while SafeIdentifier-based request-time validation is Story
-        // 12.2's responsibility. created_by has no FK yet — platform_admins does not
-        // exist until Story 12.4.
+        // 12.2's responsibility. created_by is FK'd to platform_admins.id below (Story
+        // 12.4) — no navigation property, same shape as DatasetAuditLogEntry.ActorId.
         modelBuilder.Entity<Tenant>(e =>
         {
             e.ToTable("tenants", t => t.HasCheckConstraint(
@@ -449,6 +450,27 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
             e.Property(tn => tn.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
             e.Property(tn => tn.CreatedBy).HasColumnName("created_by");
             e.HasIndex(tn => tn.SchemaName).IsUnique().HasDatabaseName("uq_tenants_schema_name");
+            e.HasIndex(tn => tn.CreatedBy).HasDatabaseName("idx_tenants_created_by");
+            e.HasOne<PlatformAdmin>()
+             .WithMany()
+             .HasForeignKey(tn => tn.CreatedBy)
+             .HasConstraintName("fk_tenants_platform_admins")
+             .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // Story 12.4 (FR-74 / architecture.md §7.4) — platform_admins is the account
+        // store for the platform-super-admin tier, seeded once at bootstrap
+        // (Program.cs). Unique index on user_email mirrors uq_users_email; no
+        // MFA/roles columns — see PlatformAdmin.cs for why.
+        modelBuilder.Entity<PlatformAdmin>(e =>
+        {
+            e.ToTable("platform_admins");
+            e.HasKey(p => p.Id);
+            e.Property(p => p.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+            e.Property(p => p.UserEmail).HasColumnName("user_email").IsRequired().HasMaxLength(320);
+            e.Property(p => p.PasswordHash).HasColumnName("password_hash").IsRequired();
+            e.Property(p => p.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+            e.HasIndex(p => p.UserEmail).IsUnique().HasDatabaseName("uq_platform_admins_user_email");
         });
 
         // Story 12.3 (FR-74 / architecture.md §7.3) — email->tenant routing table, also

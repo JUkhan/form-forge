@@ -385,15 +385,21 @@ internal static class AuthEndpoints
         // here (provided the proxy is trusted via Security:ForwardedHeaders:KnownProxies).
         var secure = ctx.Request.IsHttps;
 
-        ctx.Response.Cookies.Append("refresh_token", response.RefreshToken, new CookieOptions
+        // Story 12.4 — a platform-super-admin login never writes a refresh-token row
+        // (access-token-only decision), so RefreshToken is null here. No cookie is set
+        // in that case; every other caller still gets the HttpOnly refresh cookie.
+        if (response.RefreshToken is not null)
         {
-            HttpOnly = true,
-            SameSite = SameSiteMode.Strict,
-            Secure = secure,
-            Path = "/api/auth",
-            // Cookie lifetime mirrors the refresh token's server-side ExpiresAt.
-            Expires = DateTimeOffset.UtcNow.AddDays(refreshTokenTtlDays),
-        });
+            ctx.Response.Cookies.Append("refresh_token", response.RefreshToken, new CookieOptions
+            {
+                HttpOnly = true,
+                SameSite = SameSiteMode.Strict,
+                Secure = secure,
+                Path = "/api/auth",
+                // Cookie lifetime mirrors the refresh token's server-side ExpiresAt.
+                Expires = DateTimeOffset.UtcNow.AddDays(refreshTokenTtlDays),
+            });
+        }
 
         return Results.Ok(response);
     }

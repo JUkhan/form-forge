@@ -48,7 +48,7 @@ public sealed class MutationAuditLogIntegrationTests : IClassFixture<PostgresFix
         await db.Database.MigrateAsync();
 
         await db.Database.ExecuteSqlRawAsync(
-            "TRUNCATE TABLE menu_role_assignments, menus, component_schema_versions, component_schemas, role_permissions, user_roles, roles, refresh_tokens, users, schema_audit_log, mutation_audit_log, tenants, tenant_user_index RESTART IDENTITY CASCADE;");
+            "TRUNCATE TABLE menu_role_assignments, menus, component_schema_versions, component_schemas, role_permissions, user_roles, roles, refresh_tokens, users, schema_audit_log, mutation_audit_log, tenants, tenant_user_index, platform_admins RESTART IDENTITY CASCADE;");
 
         // Drop any dynamically-provisioned tables left behind by sibling test classes.
         await db.Database.ExecuteSqlRawAsync("""
@@ -59,7 +59,7 @@ public sealed class MutationAuditLogIntegrationTests : IClassFixture<PostgresFix
                     SELECT tablename FROM pg_tables
                     WHERE schemaname = 'public'
                       AND tablename NOT IN (
-                          'users', 'refresh_tokens', 'roles', 'role_permissions', 'user_roles', 'tenants', 'tenant_user_index',
+                          'users', 'refresh_tokens', 'roles', 'role_permissions', 'user_roles', 'tenants', 'tenant_user_index', 'platform_admins',
                           'component_schemas', 'component_schema_versions',
                           'menus', 'menu_role_assignments',
                           'schema_audit_log',

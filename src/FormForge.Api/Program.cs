@@ -331,6 +331,9 @@ builder.Services.AddAuthorization(options =>
     // Role claim type is "roles" (see JwtBearerOptions.RoleClaimType above). The
     // "platform-admin" policy is required by RequirePlatformAdmin() on /api/admin/*.
     options.AddPolicy("platform-admin", policy => policy.RequireRole("platform-admin"));
+    // Story 12.4 — "platform-super-admin" policy backs RequirePlatformSuperAdmin(),
+    // an unused extension left for Story 12.5's /api/admin/tenants/* group to consume.
+    options.AddPolicy("platform-super-admin", policy => policy.RequireRole("platform-super-admin"));
 });
 
 // CORS — allowlist Vite dev server; production origin injected as env var (AR-14).
@@ -566,34 +569,26 @@ try
 #pragma warning restore EF1002
     }
 
-    // Bootstrap: create a default platform-admin user if the users table is empty.
-    // Credentials are emitted as a startup warning so the operator can retrieve them.
-    // Skipped on every subsequent restart once any user exists.
-    if (!db.Users.Any())
+    // Story 12.4 — bootstrap: create a default platform-super-admin account into
+    // public.platform_admins (never into any `users` table — architecture.md §7.4) if
+    // none exists yet. Credentials are emitted as a startup warning so the operator can
+    // retrieve them. Skipped on every subsequent restart once any platform_admins row
+    // exists.
+    if (!db.PlatformAdmins.Any())
     {
         var hasher = scope.ServiceProvider.GetRequiredService<IPasswordHasher>();
         const string adminEmail = "admin@formforge.local";
         const string adminPassword = "Admin1234!";
-        var platformAdminRoleId = new Guid("00000000-0000-0000-0000-000000000001");
-        var now = DateTimeOffset.UtcNow;
-        var adminUser = new FormForge.Api.Domain.Entities.User
+        var platformAdmin = new FormForge.Api.Domain.Entities.PlatformAdmin
         {
             Id = Guid.NewGuid(),
-            Email = adminEmail,
-            DisplayName = "Admin",
+            UserEmail = adminEmail,
             PasswordHash = hasher.Hash(adminPassword),
-            IsActive = true,
-            CreatedAt = now,
+            CreatedAt = DateTimeOffset.UtcNow,
         };
-        adminUser.UserRoles.Add(new FormForge.Api.Domain.Entities.UserRole
-        {
-            UserId = adminUser.Id,
-            RoleId = platformAdminRoleId,
-            CreatedAt = now,
-        });
-        db.Users.Add(adminUser);
+        db.PlatformAdmins.Add(platformAdmin);
         db.SaveChanges();
-        StartupLog.BootstrapAdminCreated(app.Logger, adminEmail, adminPassword);
+        StartupLog.BootstrapPlatformAdminCreated(app.Logger, adminEmail, adminPassword);
     }
 }
 #pragma warning disable CA1031
@@ -742,6 +737,10 @@ app.MapGroup("/api/menus")
 // handlers will override individually with "data-write" (60/min).
 app.MapGroup("/api/data/{designerId}")
    .RequireAuth()
+   // Story 12.4 — several endpoints in this group are deliberately auth-only (no
+   // per-endpoint RequirePermission), so a platform-super-admin JWT must be denied
+   // here at the group level; see RouteGroupExtensions.DenyPlatformSuperAdmin.
+   .DenyPlatformSuperAdmin()
    .RequireRateLimiting("data-read")
    .WithTags("Dynamic Data")
    .MapDynamicDataEndpoints();
@@ -769,6 +768,10 @@ app.MapGroup("/api/designers")
 // rate-limit bucket as the other authenticated admin-tooling reads.
 app.MapGroup("/api/datasets")
    .RequireAuth()
+   // Story 12.4 — dataset reads are deliberately auth-only (no per-endpoint
+   // RequireDatasetManagement), so a platform-super-admin JWT must be denied here at
+   // the group level; see RouteGroupExtensions.DenyPlatformSuperAdmin.
+   .DenyPlatformSuperAdmin()
    .RequireRateLimiting("admin")
    .WithTags("Datasets")
    .MapDatasetEndpoints();
@@ -787,8 +790,8 @@ internal static partial class StartupLog
 
     [Microsoft.Extensions.Logging.LoggerMessage(
         Level = Microsoft.Extensions.Logging.LogLevel.Warning,
-        Message = "Bootstrap: created default admin user. Email={Email} Password={Password} — change after first login.")]
-    public static partial void BootstrapAdminCreated(Microsoft.Extensions.Logging.ILogger logger, string email, string password);
+        Message = "Bootstrap: created default platform-super-admin account. Email={Email} Password={Password} — change after first login.")]
+    public static partial void BootstrapPlatformAdminCreated(Microsoft.Extensions.Logging.ILogger logger, string email, string password);
 
     [Microsoft.Extensions.Logging.LoggerMessage(
         Level = Microsoft.Extensions.Logging.LogLevel.Critical,

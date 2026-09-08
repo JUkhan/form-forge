@@ -29,6 +29,48 @@ internal static class RouteGroupExtensions
         return group;
     }
 
+    // Story 12.4 — mirrors RequirePlatformAdmin's shape for the "platform-super-admin"
+    // policy (registered in Program.cs via AddAuthorization). Not mounted anywhere by
+    // this story — Story 12.5's /api/admin/tenants/* group is its intended consumer.
+    internal static RouteGroupBuilder RequirePlatformSuperAdmin(this RouteGroupBuilder group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        group.RequireAuthorization("platform-super-admin");
+        return group;
+    }
+
+    // Story 12.4 — group-level deny for a "platform-super-admin"-role JWT. Several
+    // endpoints in /api/data/{designerId} and /api/datasets are deliberately auth-only
+    // (no RequirePermission/RequireDatasetManagement per-endpoint check — see
+    // DynamicDataEndpoints.ListOptionsHandler), so a bare-valid platform-super-admin
+    // token would otherwise sail through with nothing to reject it. An endpoint filter
+    // (not a RequireAuthorization policy) so the response carries the same FORBIDDEN
+    // envelope shape as RequirePermission/RequireDatasetManagement rather than a bare
+    // 403 — group-level filters run for every route mapped in the group, current and
+    // future, without relying on each one remembering to check.
+    internal static RouteGroupBuilder DenyPlatformSuperAdmin(this RouteGroupBuilder group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        group.AddEndpointFilter(async (ctx, next) =>
+        {
+            if (ctx.HttpContext.User.IsInRole("platform-super-admin"))
+            {
+                return Results.Problem(
+                    detail: "Platform-super-admin accounts cannot access this resource.",
+                    title: "Permission denied",
+                    statusCode: StatusCodes.Status403Forbidden,
+                    extensions: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["code"] = "FORBIDDEN",
+                        ["messageKey"] = "errors.forbidden",
+                    });
+            }
+
+            return await next(ctx).ConfigureAwait(false);
+        });
+        return group;
+    }
+
     // Per-endpoint filter (not group-level) because each endpoint specifies its own
     // CRUD action ("create" / "read" / "update" / "delete"). The filter resolves the
     // {designerId} route value and checks effective CRUD flags via IPermissionService.

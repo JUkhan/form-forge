@@ -330,6 +330,7 @@ Reverses the single-tenant decision (formerly PRD Non-Goal A10). A Platform-Supe
 **FRs covered:** FR-74, FR-75, FR-76, FR-77, FR-78, FR-79
 **Architecture-derived scope:** Decisions 7.1 (tenant data model), 7.2 (provisioning service), 7.3 (JWT claim + `ITenantContext`), 7.4 (platform-super-admin/tenant-admin split), 7.5 (identifier sanitization extended to schema names), 7.6 (tenant-keyed cache), 7.9 (MinIO prefix, rate-limit partitioning, migration fan-out), 7.10 (tenant-isolation test gate)
 **Dependencies:** Epic 1 (infrastructure only — no auth/role dependency, since this epic *produces* the tenant-scoped identity model Epic 2 consumes)
+**Stories:** 12.1–12.6, plus **12.7** (added 2026-09-08 — split off from the original 12.2 during implementation planning; see Story 12.2's note). Seven stories total.
 
 ---
 
@@ -3022,29 +3023,31 @@ So that every subsequent tenant-scoped operation has a schema to resolve.
 **When** I inspect the schema
 **Then** only `tenants`, `platform_admins` (Story 12.4), and `tenant_user_index` (Story 12.3) remain in the `public` schema — every other table that was previously global (`users`, `roles`, `user_roles`, `menus`, `component_schemas`, `custom_dataset`, every runtime-provisioned dynamic table, and the Dataset `datasets` VIEW namespace) is provisioned per-tenant, never in `public` (per FR-74 / Decision 7.1)
 
-### Story 12.2: Tenant Provisioning Service
+### Story 12.2: Tenant Schema Provisioning
 
-As a Platform-Super-Admin,
-I can create a new tenant,
-So that a new customer/organization gets an isolated, ready-to-use instance of FormForge without direct database access.
+*Split 2026-09-08 during Story 12.2 planning: the original single "Tenant Provisioning Service" story bundled a genuinely novel, unproven technical mechanism (running EF Core's migration set against a runtime-chosen schema — no prior art anywhere in this codebase) together with five other side effects (Dataset Manager scoping, tenant-admin/user seeding, welcome email, recovery service). Investigation estimated 500–900 lines across 5–7 files with one unresolved high-risk unknown, well past a single reviewable spec. Narrowed here to the one novel mechanism, proven and tested in isolation; the remainder is Story 12.7.*
+
+As the system,
+I create a tenant's PostgreSQL schema and apply the full static-schema migration set into it,
+So that a validated tenant has a structurally-isolated, fully-migrated database ready for identity and dataset data — before anything is seeded into it.
 
 **Acceptance Criteria:**
 
-**Given** a valid tenant creation request
+**Given** a tenant creation request with a proposed `schema_name`
+**When** the request is validated
+**Then** `schema_name` is checked via `SafeIdentifier.TryCreate` (the same format/reserved-keyword rule as `designerId`, Decision 1.1/7.5) and rejected with a friendly, specific error on either an invalid format or a collision with an existing tenant's `schema_name` — an app-level pre-check in front of Story 12.1's DB-level `uq_tenants_schema_name` backstop (per FR-75 AC-1 / Decision 7.5)
+
+**Given** a validated `schema_name`
 **When** `ITenantProvisioningService` runs
-**Then** it executes, in sequence: `CREATE SCHEMA "{schema_name}"`, applies the full static-schema EF migration set into that schema, creates the tenant-scoped `{schema_name}_datasets` VIEW namespace, and scopes `formforge_preview` grants to that schema (per FR-75 AC-1 / Decisions 7.2, 7.8)
+**Then** it executes `CREATE SCHEMA "{schema_name}"` followed by the full static-schema EF migration set applied into that schema — every table currently in `public` except `tenants`, `platform_admins`, and `tenant_user_index` (per FR-75 AC-1 / Decision 7.2)
 
-**Given** the schema and migrations are in place
-**When** provisioning continues
-**Then** a tenant-admin role and its first user are seeded in the new schema, and the welcome email flow (FR-50) fires for that first user (per FR-75 AC-2 / Decision 7.2)
+**Given** the migration set has been applied
+**When** the new schema is inspected
+**Then** it contains exactly the same static tables, columns, and constraints as a freshly-migrated `public` schema (per Decision 7.2)
 
-**Given** any step before the sequence completes fails
-**When** the process crashes or errors
-**Then** the tenant row is left at `status = 'Provisioning'`; a `TenantProvisioningRecoveryService` (mirroring the FR-17 `ProvisioningRecoveryService` pattern) scans for stuck rows on startup and flags them for admin attention rather than silently retrying partially-applied DDL (per FR-75 AC-3 / Decision 7.2)
-
-**Given** the full sequence completes without error
-**When** the last step commits
-**Then** `status` becomes `Active` and the tenant is usable (per FR-75 AC-4 / Decision 7.2)
+**Given** schema creation or migration fails at any point
+**When** the failure is caught
+**Then** the tenant row remains at `status = 'Provisioning'` (the column's default from Story 12.1) — this story never advances status to `Active`; recovery and activation are Story 12.7's responsibility (per FR-75 AC-3 / Decision 7.2)
 
 ### Story 12.3: Tenant Context Resolution
 
@@ -3100,7 +3103,7 @@ So that I can onboard customers without direct database access.
 
 **Given** the Tenants page
 **When** I submit the "Create Tenant" form with a name and `schema_name`
-**Then** Story 12.2's provisioning flow is triggered and the row shows Pending/Active/Error status, polling until resolution (per FR-79 AC-2 / Decision 7.2)
+**Then** Stories 12.2 and 12.7's provisioning flow is triggered and the row shows Pending/Active/Error status, polling until resolution (per FR-79 AC-2 / Decision 7.2)
 
 ### Story 12.6: Tenant Context Middleware Integration
 
@@ -3125,3 +3128,29 @@ So that no feature has to resolve a tenant schema any other way, and no request 
 **Given** the full platform after Epics 2, 3, 4, 5, 6, and 8–11 are complete
 **When** the tenant-isolation integration test suite runs (Decision 7.10: 2+ tenants provisioned in a Testcontainers run, asserting no cross-tenant reads/writes across CRUD, Dataset, Query Builder, MinIO, and admin endpoints)
 **Then** it passes as a release gate — not ordinary coverage — before any of those epics is considered done (per FR-78 / Decision 7.10)
+
+### Story 12.7: Tenant Onboarding & Activation
+
+*Split off from the original Story 12.2 on 2026-09-08 (see Story 12.2's note) — everything the provisioning flow does once a tenant's schema and migrations (Story 12.2) already exist. Numbered 12.7, continuing the epic's sequence, rather than inserted as 12.3 and renumbering 12.3–12.6, since none of those stories were implemented yet and this keeps the diff to planning docs minimal.*
+
+As a Platform-Super-Admin,
+having provisioned a tenant's schema (Story 12.2),
+I want the tenant fully onboarded — Dataset Manager scoped, a tenant-admin seeded, notified, and marked Active — so that the tenant is actually usable, not just structurally present.
+
+**Acceptance Criteria:**
+
+**Given** a tenant whose schema and static tables already exist (Story 12.2 complete)
+**When** onboarding continues
+**Then** the tenant-scoped `{schema_name}_datasets` VIEW namespace is created and the `formforge_preview` role's grants are scoped to the new schema (per FR-75 AC-1 / Decision 7.8)
+
+**Given** the Dataset Manager scoping is in place
+**When** onboarding continues
+**Then** a tenant-admin role and its first user are seeded in the new schema, and the welcome email flow (FR-50) fires for that first user, best-effort and non-blocking — mirroring the existing bounded fire-and-forget pattern used for admin-created users, never failing onboarding on SMTP failure (per FR-75 AC-2 / Decision 7.2)
+
+**Given** every onboarding step above succeeds
+**When** the last step commits
+**Then** the tenant row's `status` becomes `Active` and the tenant is usable (per FR-75 AC-4 / Decision 7.2)
+
+**Given** a tenant is stuck at `status = 'Provisioning'` past a reasonable window (schema exists per Story 12.2, but onboarding never completed)
+**When** the API starts
+**Then** a `TenantProvisioningRecoveryService` (mirroring the FR-17 `ProvisioningRecoveryService` pattern) scans for stuck rows and flags them for admin attention rather than silently retrying partially-applied onboarding (per FR-75 AC-3 / Decision 7.2)

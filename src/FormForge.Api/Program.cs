@@ -29,6 +29,7 @@ using FormForge.Api.Features.Permissions;
 using FormForge.Api.Features.Roles;
 using FormForge.Api.Features.Roles.Dtos;
 using FormForge.Api.Features.Roles.Validators;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Features.Users;
 using FormForge.Api.Features.Users.Dtos;
 using FormForge.Api.Features.Users.Validators;
@@ -218,6 +219,12 @@ builder.Services.AddScoped<IDynamicPayloadValidator, DynamicPayloadValidator>();
 // Story 5.5 — pre-bind Repeater cycle detector. Scoped (injects FormForgeDbContext
 // which is scoped); resolved by MenuService.BindDesignerAsync at request time.
 builder.Services.AddScoped<CycleDetector>();
+
+// Story 12.2 (FR-74 / Decision 7.7) — turns a validated Tenant row (Story 12.1) into a
+// real, isolated PostgreSQL schema. Scoped: injects FormForgeDbContext (scoped) for the
+// collision pre-check; the migration replay opens its own dedicated connection/DbContext
+// instance internally. No HTTP surface yet — Story 12.5 consumes this service later.
+builder.Services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
 
 // Menu services (Story 4.1)
 builder.Services.AddScoped<IMenuService, MenuService>();

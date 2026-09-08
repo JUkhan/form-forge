@@ -8,12 +8,13 @@ This epic reverses the platform's original single-tenant decision, introducing m
 
 ## Stories
 
-- Story 12.1: Tenant Data Model
-- Story 12.2: Tenant Provisioning Service
+- Story 12.1: Tenant Data Model (done)
+- Story 12.2: Tenant Schema Provisioning (narrowed 2026-09-08 — schema create + static migration replay only)
 - Story 12.3: Tenant Context Resolution
 - Story 12.4: Platform-Super-Admin Bootstrap
 - Story 12.5: Tenants Admin Page
 - Story 12.6: Tenant Context Middleware Integration
+- Story 12.7: Tenant Onboarding & Activation (added 2026-09-08 — split off from the original 12.2: Dataset Manager scoping, tenant-admin/user seeding, welcome email, status activation, recovery service)
 
 ## Requirements & Constraints
 
@@ -44,9 +45,10 @@ This epic reverses the platform's original single-tenant decision, introducing m
 
 ## Cross-Story Dependencies
 
-- Story 12.2 (Provisioning Service) depends on Story 12.1's tenant data model existing first.
-- Story 12.3 (Tenant Context Resolution) and Story 12.4 (Platform-Super-Admin Bootstrap) depend on Stories 12.1–12.2 (a tenant and its seeded roles must exist to resolve against).
-- Story 12.5 (Tenants Admin Page) depends on Story 12.2's provisioning flow, which it triggers and polls for Pending/Active/Error status.
+- Story 12.2 (Tenant Schema Provisioning) depends on Story 12.1's tenant data model existing first. There is no existing precedent in this codebase for running EF Core's migration set against a runtime-chosen schema (no `HasDefaultSchema`/dynamic search_path usage anywhere) — this is the one genuinely novel mechanism in the epic, which is why it was split into its own story.
+- Story 12.7 (Tenant Onboarding & Activation) depends on Story 12.2's schema+migration existing; it owns everything downstream of that (Dataset Manager scoping, tenant-admin/user seeding, welcome email, status activation, recovery service). Story 12.2 never advances tenant status past `Provisioning` — only 12.7 sets `Active`.
+- Story 12.3 (Tenant Context Resolution) and Story 12.4 (Platform-Super-Admin Bootstrap) depend on Stories 12.1–12.2/12.7 (a tenant and its seeded roles must exist to resolve against).
+- Story 12.5 (Tenants Admin Page) depends on Stories 12.2 and 12.7's provisioning flow, which it triggers and polls for Pending/Active/Error status.
 - Story 12.6 (Tenant Context Middleware Integration) depends on Story 12.3 and is the integration point every other epic's data access relies on.
 - This epic as a whole must be completed before Epic 2 (Identity, Roles & Permissions) starts, since Epic 2's JWT shape and role model are produced here.
 - Epics 3, 4, 5, 6, 8, 9, 10, and 11 all consume the tenant context this epic produces and carry schema-qualification changes as a result; none of them is considered done until the tenant-isolation test suite (introduced here) passes.

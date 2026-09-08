@@ -147,7 +147,13 @@ internal static partial class TenantEndpoints
         // schema_name; the first tenant-admin's placeholder identity and temporary
         // password are entirely server-derived/generated here.
         var temporaryPassword = passwordGenerator.Generate();
-        var adminEmail = $"admin@{schemaName}.tenant.local";
+
+        // schemaName allows '_' (a valid Postgres identifier char, per SafeIdentifier), but
+        // '_' is not a valid domain-label character — browsers' native <input type="email">
+        // validation (WHATWG) rejects it, blocking the derived admin from ever logging in
+        // via the login form. Map '_' to '-' for the email's domain label only; the actual
+        // schema name (and its uniqueness guarantee) is untouched.
+        var adminEmail = $"admin@{ToEmailDomainLabel(schemaName)}.tenant.local";
         const string adminDisplayName = "Tenant Admin";
 
         try
@@ -204,6 +210,26 @@ internal static partial class TenantEndpoints
             new CreateTenantResponse(
                 new TenantDto(tenant.Id, tenant.Name, tenant.SchemaName, tenant.Status, tenant.CreatedAt),
                 temporaryPassword));
+    }
+
+    // A domain label must start and end with an alphanumeric character (WHATWG email
+    // regex), but schemaName may start/end with '_' (-> '-' after substitution). Pad with
+    // a digit rather than trimming, so distinct schema names can't collapse onto the same
+    // derived email.
+    private static string ToEmailDomainLabel(string schemaName)
+    {
+        var label = schemaName.Replace('_', '-');
+        if (label[0] == '-')
+        {
+            label = "0" + label;
+        }
+
+        if (label[^1] == '-')
+        {
+            label += "0";
+        }
+
+        return label;
     }
 
     private static IResult SchemaNameInvalidProblem(string detail) =>

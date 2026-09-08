@@ -260,6 +260,45 @@ public sealed class TenantEndpointsIntegrationTests : IClassFixture<PostgresFixt
     }
 
     [Fact]
+    public async Task CreateTenant_SchemaNameContainsUnderscore_DerivedAdminEmailIsLoginable()
+    {
+        // SafeIdentifier allows '_' in schemaName, but '_' is not a valid domain-label
+        // character: browsers' native <input type="email"> validation (WHATWG) rejects an
+        // email like "admin@test_1.tenant.local", blocking the derived admin from ever
+        // signing in via the login form. This guards TenantEndpoints.ToEmailDomainLabel's
+        // '_' -> '-' mapping end-to-end: create with an underscored schema name, then
+        // actually log in as the derived admin.
+        var token = await LoginAsync(SuperAdminEmail, SuperAdminPassword);
+        const string schemaName = "tenant_underscore_1";
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/tenants")
+        {
+            Content = JsonContent.Create(new { name = "Underscore Co", schemaName }),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await _client!.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<CreateTenantResponseDto>();
+        Assert.NotNull(body);
+
+        using var scope = _factory!.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
+        var tenantId = await db.Tenants.AsNoTracking()
+            .Where(t => t.SchemaName == schemaName)
+            .Select(t => t.Id)
+            .SingleAsync();
+        var indexEntry = await db.Set<TenantUserIndexEntry>().AsNoTracking()
+            .SingleAsync(e => e.TenantId == tenantId);
+        var domainPart = indexEntry.Email.Split('@')[1];
+        Assert.DoesNotContain('_', domainPart);
+        Assert.Equal("admin@tenant-underscore-1.tenant.local", indexEntry.Email);
+
+        // The whole point: the derived admin can actually log in with this email.
+        var adminToken = await LoginAsync(indexEntry.Email, body!.TemporaryPassword);
+        Assert.False(string.IsNullOrWhiteSpace(adminToken));
+    }
+
+    [Fact]
     public async Task CreateTenant_EmptyName_Returns422ValidationProblem()
     {
         var token = await LoginAsync(SuperAdminEmail, SuperAdminPassword);

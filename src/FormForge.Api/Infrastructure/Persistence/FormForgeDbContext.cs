@@ -25,6 +25,7 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
     public DbSet<MutationAuditLogEntry> MutationAuditLog => Set<MutationAuditLogEntry>();
     public DbSet<CustomDataset> CustomDatasets => Set<CustomDataset>();
     public DbSet<DatasetAuditLogEntry> DatasetAuditLog => Set<DatasetAuditLogEntry>();
+    public DbSet<Tenant> Tenants => Set<Tenant>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -427,6 +428,26 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
              .HasForeignKey(a => a.ActorId)
              .HasConstraintName("fk_dataset_audit_log_users_actor_id")
              .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        // Story 12.1 (FR-74 / Decision 7.1) — tenants is the one table that stays in
+        // `public`; schema_name uniqueness/format is enforced by the unique index here
+        // at the DB layer, while SafeIdentifier-based request-time validation is Story
+        // 12.2's responsibility. created_by has no FK yet — platform_admins does not
+        // exist until Story 12.4.
+        modelBuilder.Entity<Tenant>(e =>
+        {
+            e.ToTable("tenants", t => t.HasCheckConstraint(
+                "ck_tenants_status",
+                "status IN ('Provisioning', 'Active', 'Suspended')"));
+            e.HasKey(tn => tn.Id);
+            e.Property(tn => tn.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+            e.Property(tn => tn.Name).HasColumnName("name").IsRequired().HasMaxLength(200);
+            e.Property(tn => tn.SchemaName).HasColumnName("schema_name").IsRequired().HasMaxLength(63);
+            e.Property(tn => tn.Status).HasColumnName("status").IsRequired().HasDefaultValue("Provisioning").HasMaxLength(20);
+            e.Property(tn => tn.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+            e.Property(tn => tn.CreatedBy).HasColumnName("created_by");
+            e.HasIndex(tn => tn.SchemaName).IsUnique().HasDatabaseName("uq_tenants_schema_name");
         });
     }
 }

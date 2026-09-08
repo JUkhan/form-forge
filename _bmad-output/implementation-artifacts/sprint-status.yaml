@@ -1,5 +1,5 @@
 # generated: 2026-05-22
-# last_updated: 2026-06-04 (story 9-5 table-left-right-designation created — ready-for-dev)
+# last_updated: 2026-09-08 (story 12-1 tenant-data-model implemented and reviewed — review)
 # project: tinnitus
 # project_key: NOKEY
 # tracking_system: file-system
@@ -167,8 +167,8 @@ development_status:
   11-4-builder-mode-view-lifecycle-integration: done
   epic-11-retrospective: optional
 
-  epic-12: backlog
-  12-1-tenant-data-model: backlog
+  epic-12: in-progress
+  12-1-tenant-data-model: review
   12-2-tenant-provisioning-service: backlog
   12-3-tenant-context-resolution: backlog
   12-4-platform-super-admin-bootstrap: backlog

@@ -32,6 +32,7 @@ baseline_commit: 'b6fb87fd1e2417aa8d22f68f91e44a7e214462f7'
 - Do not add a `tenant_id` column or `WHERE tenant_id = ...` predicate anywhere — isolation stays structural (schema-only).
 - Do not touch `TenantProvisioningService`, `TenantOnboardingService`, or `TenantContextMiddleware`'s own tenant-resolution logic — they already build their own explicitly-scoped connections and are out of scope here.
 - Do not retrofit feature business logic (Designer, CRUD, Menus, Dataset custom-query authoring) beyond the schema-literal fixes enumerated in the Code Map — each epic's own future stories own further tenant-awareness work; this story only builds the shared mechanism and fixes the call sites that already hardcode a schema literal.
+- Do not fix `PermissionService` or `ProvisioningBackgroundService` resolving their own independent `ITenantContext` via a fresh `IServiceScopeFactory.CreateScope()` instead of the request's scoped instance — both structurally bypass the mechanism this story builds (every `RequirePermission`-gated route 403s for tenant users, and background provisioning always targets `public`), but reworking either is a different class of fix than a schema-literal replacement and is deferred (see `deferred-work.md`, "Deferred from: code review of 12-6-tenant-context-middleware-integration").
 - Do not exercise or change the scope of the tenant-isolation integration test suite (Decision 7.10) — that release gate applies once Epics 2-11 are rebuilt on top of this.
 
 ## I/O & Edge-Case Matrix

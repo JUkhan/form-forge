@@ -3,10 +3,12 @@ using System.Security.Cryptography;
 using System.Text;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Auth.Dtos;
+using FormForge.Api.Features.Designer;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 
 namespace FormForge.Api.Features.Auth;
 
@@ -99,7 +101,8 @@ internal sealed partial class AuthService(
     IOptions<JwtOptions> jwtOptions,
     AuthMetrics metrics,
     ILogger<AuthService> logger,
-    IMfaService mfaService) : IAuthService
+    IMfaService mfaService,
+    IConfiguration configuration) : IAuthService
 {
     // Refresh-token lifetime is configurable via Jwt:RefreshTokenTtlDays (default 7).
     private int RefreshTokenTtlDays => jwtOptions.Value.RefreshTokenTtlDays;
@@ -123,6 +126,23 @@ internal sealed partial class AuthService(
         // Trim first so a stray trailing space from a mobile keyboard does not
         // miss the unique-index match and surface as INVALID_CREDENTIALS.
         var normalizedEmail = email.Trim().ToLowerInvariant();
+
+        // Story 12.3 — tenant_user_index is checked first. A match means this email
+        // belongs to a tenant-schema user, so the credential check must run against
+        // that tenant's own `users` table instead of public.users. This is additive,
+        // not a hard cutover: no match falls through unchanged to the pre-12.3 path
+        // below, which is exactly what keeps the ~40 existing integration tests that
+        // seed users directly into public.users passing untouched.
+        var indexEntry = await db.TenantUserIndex
+            .AsNoTracking()
+            .Include(t => t.Tenant)
+            .FirstOrDefaultAsync(t => t.Email == normalizedEmail, ct)
+            .ConfigureAwait(false);
+
+        if (indexEntry is not null)
+        {
+            return await LoginAgainstTenantSchemaAsync(indexEntry, password, ct).ConfigureAwait(false);
+        }
 
         var user = await db.Users
             .AsNoTracking()
@@ -152,20 +172,106 @@ internal sealed partial class AuthService(
             return new AuthServiceResult(AuthLoginOutcome.MfaRequired, MfaSessionToken: mfaSessionToken);
         }
 
-        return await IssueLoginTokensAsync(user, ct).ConfigureAwait(false);
+        return await IssueLoginTokensAsync(db, user, tenantId: null, ct).ConfigureAwait(false);
+    }
+
+    // Story 12.3 — the tenant-matched half of LoginAsync. Opens a dedicated,
+    // schema-scoped FormForgeDbContext (SearchPath = the tenant's schema) using the
+    // same pattern as Story 12.2's TenantProvisioningService/TenantOnboardingService,
+    // since HasDefaultSchema can't vary per call. Re-validates schema_name via
+    // SafeIdentifier before it's interpolated into the connection string's SearchPath
+    // — same defense-in-depth posture as every other dynamic-schema call site.
+    //
+    // Deliberately does not gate on User.MfaEnabled: CompleteMfaLoginAsync (the
+    // verify-completion half of the MFA flow) has no schema awareness yet and always
+    // queries public.users, so wiring a tenant user into an MFA session it could never
+    // complete would be worse than skipping the gate. Newly onboarded tenant admins
+    // (Story 12.7) are seeded with MfaEnabled = false, so this has no observable effect
+    // in this story's scope; extending MFA to tenant schemas is left to a later story.
+    private async Task<AuthServiceResult> LoginAgainstTenantSchemaAsync(
+        TenantUserIndexEntry indexEntry, string password, CancellationToken ct)
+    {
+        if (!SafeIdentifier.TryCreate(indexEntry.Tenant.SchemaName, out var safeSchemaName, out _))
+        {
+            // A corrupted schema_name must never be interpolated into a connection
+            // string. Still pay the constant-time BCrypt cost so this branch can't be
+            // distinguished from a normal invalid-credentials response by timing.
+            passwordHasher.Verify(password, _dummyPasswordHash.Value);
+            return new AuthServiceResult(AuthLoginOutcome.InvalidCredentials);
+        }
+
+        // Defense-in-depth, same posture as TenantContextMiddleware's later per-request
+        // check: a Suspended/Provisioning tenant must never authenticate, even though its
+        // schema still exists and its admin's credentials are still valid there. Same
+        // constant-time-BCrypt treatment as the SafeIdentifier failure branch above so
+        // this can't be distinguished from a normal invalid-credentials response by timing.
+        if (!string.Equals(indexEntry.Tenant.Status, "Active", StringComparison.Ordinal))
+        {
+            passwordHasher.Verify(password, _dummyPasswordHash.Value);
+            return new AuthServiceResult(AuthLoginOutcome.InvalidCredentials);
+        }
+
+        var baseConnectionString = configuration.GetConnectionString("formforge")
+            ?? throw new InvalidOperationException("Connection string 'formforge' not configured.");
+
+        var csb = new NpgsqlConnectionStringBuilder(baseConnectionString) { SearchPath = safeSchemaName!.Value };
+        var tenantConnection = new NpgsqlConnection(csb.ConnectionString);
+        try
+        {
+            var options = new DbContextOptionsBuilder<FormForgeDbContext>().UseNpgsql(tenantConnection).Options;
+            var tenantDb = new FormForgeDbContext(options);
+            try
+            {
+                var user = await tenantDb.Users
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(u => u.Email == indexEntry.Email, ct)
+                    .ConfigureAwait(false);
+
+                var hashToVerify = user?.PasswordHash ?? _dummyPasswordHash.Value;
+                var passwordValid = passwordHasher.Verify(password, hashToVerify);
+
+                if (user is null || !passwordValid)
+                {
+                    return new AuthServiceResult(AuthLoginOutcome.InvalidCredentials);
+                }
+
+                if (!user.IsActive)
+                {
+                    return new AuthServiceResult(AuthLoginOutcome.AccountInactive);
+                }
+
+                return await IssueLoginTokensAsync(tenantDb, user, indexEntry.TenantId, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                await tenantDb.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            await tenantConnection.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     // Story 2.14 — issue the JWT + refresh-token pair. Extracted from LoginAsync so
     // the MFA-verify completion path (CompleteMfaLoginAsync) shares the exact logic.
-    private async Task<AuthServiceResult> IssueLoginTokensAsync(User user, CancellationToken ct)
+    // Story 12.3 — takes the FormForgeDbContext to write the refresh token against
+    // (the injected public-schema `db` for the legacy path, or a tenant-schema-scoped
+    // instance for a tenant-matched login) plus the optional tenantId to embed in the
+    // JWT claim. Writing a tenant user's refresh token into their own schema's
+    // refresh_tokens table (not public.refresh_tokens) is what makes RefreshAsync's
+    // unmodified public-schema lookup correctly return NotFound for them — the
+    // accepted gap this story's Design Notes call out.
+    private async Task<AuthServiceResult> IssueLoginTokensAsync(
+        FormForgeDbContext context, User user, Guid? tenantId, CancellationToken ct)
     {
-        var roleNames = await db.UserRoles
+        var roleNames = await context.UserRoles
             .Where(ur => ur.UserId == user.Id)
             .Select(ur => ur.Role.Name)
             .ToArrayAsync(ct)
             .ConfigureAwait(false);
 
-        var accessToken = jwtTokenService.CreateAccessToken(user, roleNames);
+        var accessToken = jwtTokenService.CreateAccessToken(user, roleNames, tenantId);
         var (rawToken, tokenHash) = GenerateRefreshToken();
 
         var refreshToken = new RefreshToken
@@ -175,8 +281,8 @@ internal sealed partial class AuthService(
             ExpiresAt = DateTimeOffset.UtcNow.AddDays(RefreshTokenTtlDays),
             CreatedAt = DateTimeOffset.UtcNow,
         };
-        db.RefreshTokens.Add(refreshToken);
-        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        context.RefreshTokens.Add(refreshToken);
+        await context.SaveChangesAsync(ct).ConfigureAwait(false);
 
         var ttlSeconds = jwtOptions.Value.AccessTokenTtlMinutes * 60;
 
@@ -208,7 +314,11 @@ internal sealed partial class AuthService(
         if (user is null)
             return new AuthServiceResult(AuthLoginOutcome.InvalidCredentials);
 
-        return await IssueLoginTokensAsync(user, ct).ConfigureAwait(false);
+        // Story 12.3 — CompleteMfaLoginAsync is only reachable from the legacy
+        // public.users path today (see LoginAgainstTenantSchemaAsync's comment on why
+        // tenant users never get an MFA session in this story), so this always uses
+        // the injected public-schema `db` with no tenantId claim.
+        return await IssueLoginTokensAsync(db, user, tenantId: null, ct).ConfigureAwait(false);
     }
 
     public async Task<AuthRefreshResult> RefreshAsync(string rawToken, CancellationToken ct)

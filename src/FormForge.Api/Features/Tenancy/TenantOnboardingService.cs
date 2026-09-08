@@ -191,7 +191,11 @@ internal sealed partial class TenantOnboardingService(
             }
         }
 
-        // 4. Activate. Re-fetch through this service's own FormForgeDbContext so the
+        // 4. Insert the email->tenant routing row (Story 12.3, FR-74) and activate the
+        // tenant, in the same public-schema FormForgeDbContext call/SaveChanges. This is
+        // what lets the tenant's first user log in at all — LoginAsync checks
+        // tenant_user_index before it can ever run the schema-scoped credential check.
+        // Re-fetch the tenant through this service's own FormForgeDbContext so the
         // update works whether or not the caller's `tenant` instance is already tracked
         // here — EF's identity resolution returns the same tracked instance either way,
         // so no double-tracking conflict is possible.
@@ -199,6 +203,12 @@ internal sealed partial class TenantOnboardingService(
             .FirstOrDefaultAsync(t => t.Id == tenant.Id, ct)
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Tenant '{tenant.Id}' was not found.");
+
+        db.TenantUserIndex.Add(new TenantUserIndexEntry
+        {
+            Email = adminUser.Email,
+            TenantId = tenant.Id,
+        });
 
         trackedTenant.Status = "Active";
         await db.SaveChangesAsync(ct).ConfigureAwait(false);

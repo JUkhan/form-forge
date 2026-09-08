@@ -233,6 +233,13 @@ builder.Services.AddScoped<ITenantOnboardingService, TenantOnboardingService>();
 // Startup-scan flag-only recovery for tenants stuck at Status == "Provisioning" (FR-75
 // AC-3) — mirrors ProvisioningRecoveryService's shape but never retries or mutates state.
 builder.Services.AddHostedService<TenantProvisioningRecoveryService>();
+// Story 12.3 (FR-74 / architecture.md §7.3) — per-request tenant resolution. TenantContext
+// is Scoped (one per request, mirrors FormForgeDbContext's lifetime); TenantLookupCache is
+// Singleton (wraps IMemoryCache, holds no per-request state — mirrors ISchemaRegistry).
+// TenantContextMiddleware itself is registered later, between UseAuthentication() and
+// UseAuthorization() (see comment at that call site for why).
+builder.Services.AddScoped<ITenantContext, TenantContext>();
+builder.Services.AddSingleton<ITenantLookupCache, TenantLookupCache>();
 
 // Menu services (Story 4.1)
 builder.Services.AddScoped<IMenuService, MenuService>();
@@ -651,6 +658,12 @@ if (!app.Environment.IsDevelopment())
 }
 
 app.UseAuthentication();
+// Story 12.3 — must run after UseAuthentication() (needs HttpContext.User already
+// populated from the validated JWT) and before UseAuthorization() (RequireAuth /
+// RequirePermission run at that stage) — see this story's Design Notes for why this
+// is not immediately after CorrelationIdMiddleware despite architecture.md's looser
+// phrasing.
+app.UseMiddleware<TenantContextMiddleware>();
 app.UseAuthorization();
 // Rate limiter must run AFTER authentication so the "admin" policy's partition
 // factory can read the authenticated userId claim. Otherwise httpContext.User

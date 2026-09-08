@@ -26,6 +26,7 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
     public DbSet<CustomDataset> CustomDatasets => Set<CustomDataset>();
     public DbSet<DatasetAuditLogEntry> DatasetAuditLog => Set<DatasetAuditLogEntry>();
     public DbSet<Tenant> Tenants => Set<Tenant>();
+    public DbSet<TenantUserIndexEntry> TenantUserIndex => Set<TenantUserIndexEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -448,6 +449,24 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
             e.Property(tn => tn.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
             e.Property(tn => tn.CreatedBy).HasColumnName("created_by");
             e.HasIndex(tn => tn.SchemaName).IsUnique().HasDatabaseName("uq_tenants_schema_name");
+        });
+
+        // Story 12.3 (FR-74 / architecture.md §7.3) — email->tenant routing table, also
+        // kept in `public` (alongside tenants). No CreatedAt/audit columns per the
+        // story's I/O matrix — this is a routing pointer, not a domain record. Cascade
+        // delete: removing a tenant row removes its stale index entries too (there is
+        // no scenario yet where a tenant outlives its index rows).
+        modelBuilder.Entity<TenantUserIndexEntry>(e =>
+        {
+            e.ToTable("tenant_user_index");
+            e.HasKey(t => t.Email);
+            e.Property(t => t.Email).HasColumnName("email").IsRequired().HasMaxLength(320);
+            e.Property(t => t.TenantId).HasColumnName("tenant_id").IsRequired();
+            e.HasOne(t => t.Tenant)
+             .WithMany()
+             .HasForeignKey(t => t.TenantId)
+             .HasConstraintName("fk_tenant_user_index_tenants")
+             .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

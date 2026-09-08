@@ -9,14 +9,14 @@ namespace FormForge.Api.Features.Auth;
 
 internal interface IJwtTokenService
 {
-    string CreateAccessToken(User user, IReadOnlyList<string> roleNames);
+    string CreateAccessToken(User user, IReadOnlyList<string> roleNames, Guid? tenantId = null);
 }
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812",
     Justification = "Registered via DI.")]
 internal sealed class JwtTokenService(IOptions<JwtOptions> jwtOptions) : IJwtTokenService
 {
-    public string CreateAccessToken(User user, IReadOnlyList<string> roleNames)
+    public string CreateAccessToken(User user, IReadOnlyList<string> roleNames, Guid? tenantId = null)
     {
         ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(roleNames);
@@ -47,6 +47,14 @@ internal sealed class JwtTokenService(IOptions<JwtOptions> jwtOptions) : IJwtTok
         foreach (var role in roleNames)
         {
             claims.Add(new Claim("roles", role));
+        }
+
+        // Story 12.3 — only present when the authenticating user resolved through
+        // tenant_user_index (AuthService.LoginAsync). Legacy public.users logins keep
+        // issuing claim-less tokens, matching the additive (not hard-cutover) decision.
+        if (tenantId is not null)
+        {
+            claims.Add(new Claim("tenantId", tenantId.Value.ToString()));
         }
 
         var token = new JwtSecurityToken(

@@ -298,30 +298,60 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
 
     // --- Duplicate admin email across tenants -------------------------------------------
 
+    // Story 12.3 (FR-74 / architecture.md §7.3) update: tenant_user_index.email is now
+    // the table's PRIMARY KEY (one tenant per email, globally — "a user belongs to
+    // exactly one tenant in this phase"), so a second tenant onboarding the SAME admin
+    // email can no longer both succeed. This test previously asserted "both succeed"
+    // (pre-12.3, when no such index existed) — it now asserts the corrected invariant:
+    // the second onboarding fails and its tenant is left stuck at "Provisioning", the
+    // same accepted partial-completion shape this class's own header comment documents
+    // for any failure before the final activation step.
+    //
+    // Each onboarding call uses its own DI scope (its own FormForgeDbContext instance),
+    // mirroring how two independent onboarding requests behave in production (Story
+    // 12.5) — this way the conflict surfaces as a real DB-level unique-constraint
+    // violation (DbUpdateException), not an in-memory EF change-tracker artifact from
+    // reusing one context's identity map across both calls.
     [Fact]
-    public async Task OnboardTenantAsync_DuplicateAdminEmailAcrossTenants_BothSucceed()
+    public async Task OnboardTenantAsync_DuplicateAdminEmailAcrossTenants_SecondOnboardingFails()
     {
-        using var scope = _factory!.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
-        var provisioningSvc = scope.ServiceProvider.GetRequiredService<ITenantProvisioningService>();
-        var onboardingSvc = scope.ServiceProvider.GetRequiredService<ITenantOnboardingService>();
+        Tenant tenantA;
+        Tenant tenantB;
+        using (var provisionScope = _factory!.Services.CreateScope())
+        {
+            var db = provisionScope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
+            var provisioningSvc = provisionScope.ServiceProvider.GetRequiredService<ITenantProvisioningService>();
 
-        var tenantA = new Tenant { Name = "Tenant A", SchemaName = "tenant_dup_email_a" };
-        var tenantB = new Tenant { Name = "Tenant B", SchemaName = "tenant_dup_email_b" };
-        db.Tenants.AddRange(tenantA, tenantB);
-        await db.SaveChangesAsync();
+            tenantA = new Tenant { Name = "Tenant A", SchemaName = "tenant_dup_email_a" };
+            tenantB = new Tenant { Name = "Tenant B", SchemaName = "tenant_dup_email_b" };
+            db.Tenants.AddRange(tenantA, tenantB);
+            await db.SaveChangesAsync();
 
-        await provisioningSvc.ProvisionSchemaAsync(tenantA, CancellationToken.None);
-        await provisioningSvc.ProvisionSchemaAsync(tenantB, CancellationToken.None);
+            await provisioningSvc.ProvisionSchemaAsync(tenantA, CancellationToken.None);
+            await provisioningSvc.ProvisionSchemaAsync(tenantB, CancellationToken.None);
+        }
 
         const string sharedEmail = "shared-admin@example.com";
-        await onboardingSvc.OnboardTenantAsync(tenantA, sharedEmail, "Admin A", "TempPassw0rd!", CancellationToken.None);
-        await onboardingSvc.OnboardTenantAsync(tenantB, sharedEmail, "Admin B", "TempPassw0rd!", CancellationToken.None);
+
+        using (var scopeA = _factory!.Services.CreateScope())
+        {
+            var onboardingSvc = scopeA.ServiceProvider.GetRequiredService<ITenantOnboardingService>();
+            await onboardingSvc.OnboardTenantAsync(
+                tenantA, sharedEmail, "Admin A", "TempPassw0rd!", CancellationToken.None);
+        }
+
+        using (var scopeB = _factory!.Services.CreateScope())
+        {
+            var onboardingSvc = scopeB.ServiceProvider.GetRequiredService<ITenantOnboardingService>();
+            await Assert.ThrowsAsync<DbUpdateException>(
+                () => onboardingSvc.OnboardTenantAsync(
+                    tenantB, sharedEmail, "Admin B", "TempPassw0rd!", CancellationToken.None));
+        }
 
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
         Assert.Equal("Active", (await verifyDb.Tenants.SingleAsync(t => t.Id == tenantA.Id)).Status);
-        Assert.Equal("Active", (await verifyDb.Tenants.SingleAsync(t => t.Id == tenantB.Id)).Status);
+        Assert.Equal("Provisioning", (await verifyDb.Tenants.SingleAsync(t => t.Id == tenantB.Id)).Status);
     }
 
     // ---------- helpers ----------

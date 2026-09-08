@@ -103,6 +103,33 @@ public sealed class JwtTokenServiceTests
         Assert.Throws<InvalidOperationException>(() => service.CreateAccessToken(CreateUser(), []));
     }
 
+    // Story 12.3 — the tenantId parameter is optional and off by default; only a
+    // tenant-matched login (AuthService.LoginAgainstTenantSchemaAsync) supplies one.
+
+    [Fact]
+    public void CreateAccessToken_NullTenantId_OmitsTenantIdClaim()
+    {
+        var service = CreateService();
+        var token = service.CreateAccessToken(CreateUser(), [], tenantId: null);
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+
+        Assert.DoesNotContain(jwt.Claims, c => c.Type == "tenantId");
+    }
+
+    [Fact]
+    public void CreateAccessToken_WithTenantId_IncludesTenantIdClaimWithCorrectValue()
+    {
+        var service = CreateService();
+        var tenantId = Guid.NewGuid();
+        var token = service.CreateAccessToken(CreateUser(), [], tenantId);
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+
+        var claim = Assert.Single(jwt.Claims, c => c.Type == "tenantId");
+        Assert.Equal(tenantId.ToString(), claim.Value);
+    }
+
     [Fact]
     public void CreateAccessToken_IatClaim_IsEmittedAsNumericDate()
     {

@@ -30,6 +30,8 @@ using FormForge.Api.Features.Roles;
 using FormForge.Api.Features.Roles.Dtos;
 using FormForge.Api.Features.Roles.Validators;
 using FormForge.Api.Features.Tenancy;
+using FormForge.Api.Features.Tenancy.Dtos;
+using FormForge.Api.Features.Tenancy.Validators;
 using FormForge.Api.Features.Users;
 using FormForge.Api.Features.Users.Dtos;
 using FormForge.Api.Features.Users.Validators;
@@ -240,6 +242,10 @@ builder.Services.AddHostedService<TenantProvisioningRecoveryService>();
 // UseAuthorization() (see comment at that call site for why).
 builder.Services.AddScoped<ITenantContext, TenantContext>();
 builder.Services.AddSingleton<ITenantLookupCache, TenantLookupCache>();
+// Story 12.5 — /api/admin/tenants (platform-super-admin only). Stateless CSPRNG-backed
+// generator, so Singleton (mirrors IPasswordHasher/IJwtTokenService).
+builder.Services.AddSingleton<ITemporaryPasswordGenerator, TemporaryPasswordGenerator>();
+builder.Services.AddScoped<IValidator<CreateTenantRequest>, CreateTenantRequestValidator>();
 
 // Menu services (Story 4.1)
 builder.Services.AddScoped<IMenuService, MenuService>();
@@ -712,6 +718,16 @@ app.MapGroup("/api/admin")
    .RequireRateLimiting("admin")
    .WithTags("Admin")
    .MapAdminEndpoints();
+
+// Story 12.5 — mounted at its own top-level group, deliberately NOT nested under
+// /api/admin above: that group's RequirePlatformAdmin() checks the "platform-admin"
+// role claim, which a platform-super-admin JWT (Story 12.4) never carries.
+app.MapGroup("/api/admin/tenants")
+   .RequireAuth()
+   .RequirePlatformSuperAdmin()
+   .RequireRateLimiting("admin")
+   .WithTags("Admin — Tenants")
+   .MapTenantEndpoints();
 
 // /api/users — self-service endpoints for the calling user. Uses "admin" sliding
 // window (120/min/user) since AR-15 doesn't define a separate limit for self reads.

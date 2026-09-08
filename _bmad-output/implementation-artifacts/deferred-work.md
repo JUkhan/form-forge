@@ -888,3 +888,16 @@ Items deferred during code review and other workflows. Each entry links to the s
 - source_spec: `_bmad-output/implementation-artifacts/12-3-tenant-context-resolution.md`
   summary: `AuthService.LoginAgainstTenantSchemaAsync` opens a brand-new `NpgsqlConnection` + `FormForgeDbContext` on every tenant-matched login, risking Npgsql connection-pool multiplication per tenant schema at scale.
   evidence: Story 12.2's `TenantProvisioningService`/`TenantOnboardingService` established the ad hoc schema-scoped-connection pattern for rare, one-off provisioning calls; this story extends it to the login path (much hotter). Distinct connection strings (via `SearchPath`) mean Npgsql pools one connection pool per tenant schema instead of sharing the single DI-managed pool used everywhere else. No demonstrated failure today (no production traffic yet); the real fix is a shared per-schema pooled `DbContext` factory, which belongs to Story 12.6's per-request dynamic-schema EF wiring — explicitly out of scope for Story 12.3.
+
+- source_spec: `_bmad-output/implementation-artifacts/12-5-tenants-admin-page.md`
+  summary: If ProvisionSchemaAsync succeeds but OnboardTenantAsync throws during tenant creation, the already-created Postgres schema is left orphaned with no cleanup path.
+  evidence: Consistent with 12.2/12.7's established "flag only, never reconcile" philosophy for partial failures, but no automated or manual cleanup mechanism exists for the orphaned schema itself (only the tenant row is flagged Error).
+- source_spec: `_bmad-output/implementation-artifacts/12-5-tenants-admin-page.md`
+  summary: Once a tenant row reaches status=Error, its schema_name is permanently unusable (uq_tenants_schema_name blocks reuse) with no delete/reset endpoint exposed.
+  evidence: This story is list+create only per FR-79's "minimal admin page" framing; a delete/reclaim endpoint for Error-status tenants is a natural follow-up, not addressed here.
+- source_spec: `_bmad-output/implementation-artifacts/12-5-tenants-admin-page.md`
+  summary: Tenant creation (schema provisioning + first-admin credential generation) writes no audit-log entry, unlike comparable schema/admin mutations elsewhere in the codebase.
+  evidence: TableProvisioningService, DdlEmitter, and DynamicCrud mutation handlers all write to a domain-specific audit-log table; tenant creation is arguably the highest-privilege mutation in the system and has no equivalent trail beyond Tenant.CreatedBy. epics.md's FR-79 scopes this story as "a minimal admin page," so building a new tenant_audit_log table/entity/endpoint was treated as future scope rather than an unaddressed gap in this story.
+- source_spec: `_bmad-output/implementation-artifacts/12-5-tenants-admin-page.md`
+  summary: No guard exists for a reverse-proxy/gateway timeout cutting the connection mid-flight during the fully synchronous create-tenant request (schema provisioning + full onboarding run inline).
+  evidence: Deliberate consequence of this story's synchronous-orchestration Approach (matching 12.2/12.7's own synchronous design); an operational/deployment-configuration concern (ensure the gateway timeout for this endpoint accommodates full provisioning duration), not a code defect.

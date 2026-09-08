@@ -6,9 +6,12 @@ export interface AuthenticatedUser {
   roles: string[]
 }
 
+// Story 12.5 — refreshToken is null for a platform-super-admin login (Story 12.4's
+// access-token-only decision: that tier's session never writes a refresh-token row),
+// matching the backend's LoginResponse.RefreshToken (string?).
 export interface RefreshResponse {
   accessToken: string
-  refreshToken: string
+  refreshToken: string | null
   expiresIn: number
   user: AuthenticatedUser
 }

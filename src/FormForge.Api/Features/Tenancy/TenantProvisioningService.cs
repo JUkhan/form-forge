@@ -32,10 +32,15 @@ internal sealed partial class TenantProvisioningService(
     // keyword), so without this check schema_name = "public" would pass validation and
     // the collision check, then fail at CREATE SCHEMA with a raw Postgres exception
     // instead of the friendly validation error the I/O matrix promises.
+    // internal (not private) + IsReservedSchemaName below so TenantEndpoints.CreateTenantHandler
+    // (Story 12.5) can run this same check BEFORE inserting a tenant row — reused, not
+    // duplicated, per that story's "do not reimplement it" boundary.
     private static readonly HashSet<string> ReservedSchemaNames = new(StringComparer.Ordinal)
     {
         "public", "pg_catalog", "information_schema", "pg_temp",
     };
+
+    internal static bool IsReservedSchemaName(string schemaName) => ReservedSchemaNames.Contains(schemaName);
 
     public async Task ProvisionSchemaAsync(Tenant tenant, CancellationToken ct)
     {

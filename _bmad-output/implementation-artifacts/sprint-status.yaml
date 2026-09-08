@@ -1,5 +1,5 @@
 # generated: 2026-05-22
-# last_updated: 2026-09-08 (story 12-3 tenant-context-resolution implemented, reviewed, and patched — review)
+# last_updated: 2026-09-08 (story 12-5 tenants-admin-page implemented, reviewed, and patched — review)
 # project: tinnitus
 # project_key: NOKEY
 # tracking_system: file-system
@@ -172,7 +172,7 @@ development_status:
   12-2-tenant-schema-provisioning: review
   12-3-tenant-context-resolution: review
   12-4-platform-super-admin-bootstrap: review
-  12-5-tenants-admin-page: backlog
+  12-5-tenants-admin-page: review
   12-6-tenant-context-middleware-integration: backlog
   12-7-tenant-onboarding-activation: review
   epic-12-retrospective: optional

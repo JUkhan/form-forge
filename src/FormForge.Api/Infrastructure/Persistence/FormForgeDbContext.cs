@@ -439,9 +439,13 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
         // 12.4) — no navigation property, same shape as DatasetAuditLogEntry.ActorId.
         modelBuilder.Entity<Tenant>(e =>
         {
+            // Story 12.5 — 'Error' added to the terminal-state set: the create-tenant
+            // endpoint's own catch block sets this when ProvisionSchemaAsync or
+            // OnboardTenantAsync throws mid-flow (Decision, additive to
+            // TenantProvisioningRecoveryService's unrelated flag-only scan).
             e.ToTable("tenants", t => t.HasCheckConstraint(
                 "ck_tenants_status",
-                "status IN ('Provisioning', 'Active', 'Suspended')"));
+                "status IN ('Provisioning', 'Active', 'Suspended', 'Error')"));
             e.HasKey(tn => tn.Id);
             e.Property(tn => tn.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
             e.Property(tn => tn.Name).HasColumnName("name").IsRequired().HasMaxLength(200);

@@ -39,6 +39,15 @@ export function useLoginMutation(redirectTo?: string, onMfaRequired?: (token: st
       ) {
         applyTheme(serverTheme as Theme)
       }
+      // Story 12.5 — a platform-super-admin session (Story 12.4's access-token-only
+      // tier) cannot load the tenant `_app` shell at all: it has no tenantId claim and
+      // no refresh token, so useAuthQuery/usePermissionsQuery would immediately fail.
+      // Route it straight to the standalone /admin/tenants route instead of honoring
+      // any `redirectTo` (which only ever targets a tenant-shell path anyway).
+      if (response.user.roles.includes('platform-super-admin')) {
+        void navigate({ to: '/admin/tenants', replace: true })
+        return
+      }
       // Same-origin guarantee comes from loginSearchSchema (regex /^\/(?!\/)/).
       // Use `to` (typed route form) not `href` — `href` would accept absolute URLs.
       void navigate({ to: (redirectTo ?? '/') as '/', replace: true })

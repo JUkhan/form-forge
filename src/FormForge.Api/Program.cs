@@ -110,8 +110,15 @@ builder.Services.AddProblemDetails(options =>
     };
 });
 
-builder.Services.AddDbContext<FormForgeDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("formforge")));
+// Story 12.6 — TenantSchemaConnectionInterceptor is registered Scoped and resolved via
+// the (serviceProvider, options) overload so the interceptor instance backing each
+// FormForgeDbContext reads that same request's scoped ITenantContext. It rewrites the
+// physical connection's search_path at ConnectionOpening/ConnectionOpeningAsync time
+// (never at DbContext construction) — see the interceptor's own comments for why.
+builder.Services.AddScoped<TenantSchemaConnectionInterceptor>();
+builder.Services.AddDbContext<FormForgeDbContext>((sp, options) =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("formforge"))
+        .AddInterceptors(sp.GetRequiredService<TenantSchemaConnectionInterceptor>()));
 
 builder.Services.AddMemoryCache();
 
@@ -206,11 +213,12 @@ builder.Services.AddHostedService<ProvisioningBackgroundService>();
 builder.Services.AddHostedService<ProvisioningRecoveryService>();
 
 // Story 5.3 — Dapper-backed dynamic-schema DDL. DbConnectionFactory wraps raw
-// NpgsqlConnection (singleton: holds no per-request state beyond the config).
-// SchemaRegistry caches (designerId, version) → ColumnDefinition[] for Epic 6
-// CRUD. DdlEmitter is scoped because it injects FormForgeDbContext which is
+// NpgsqlConnection. SchemaRegistry caches (designerId, version) → ColumnDefinition[]
+// for Epic 6 CRUD. DdlEmitter is scoped because it injects FormForgeDbContext which is
 // scoped; ProvisioningBackgroundService resolves it via per-job IServiceScope.
-builder.Services.AddSingleton<DbConnectionFactory>();
+// Story 12.6 — Scoped (not Singleton): DbConnectionFactory now reads the scoped
+// ITenantContext at connection-open time to set search_path per tenant.
+builder.Services.AddScoped<DbConnectionFactory>();
 builder.Services.AddSingleton<ISchemaRegistry, SchemaRegistry>();
 builder.Services.AddScoped<DdlEmitter>();
 // "Table Provisioned" admin tab — provision/sync a CRUD designer's table without a
@@ -285,14 +293,17 @@ builder.Services.AddScoped<IValidator<UpdateDatasetRequest>, UpdateDatasetReques
 // Story 8.4 — Dataset lifecycle service and VIEW DDL manager.
 builder.Services.AddScoped<DatasetViewManager>();
 builder.Services.AddScoped<IDatasetService, DatasetService>();
-// Story 9.1 (FR-63 / AR-62) — config-backed allowlist + 5-min catalog cache.
-// Singleton: the effective allowlist is derived once at startup from IConfiguration,
-// IMemoryCache is itself a singleton, and DbConnectionFactory is a singleton (see §4).
-builder.Services.AddSingleton<IDatasetAllowlist, DatasetAllowlist>();
-// Story 11.3 (FR-72 / AR-63) — read-only LIMIT-10 query preview. The connection factory is
-// a singleton (stateless; reads the dedicated `formforge_preview` connection string, which
-// owns its own bounded Npgsql pool); the per-request service is scoped like IDatasetService.
-builder.Services.AddSingleton<IPreviewConnectionFactory, PreviewConnectionFactory>();
+// Story 9.1 (FR-63 / AR-62) — config-backed allowlist + 5-min catalog cache
+// (IMemoryCache is itself a singleton, shared across the Scoped instances below).
+// Story 12.6 — Scoped (not Singleton): DatasetAllowlist now reads the scoped
+// ITenantContext to resolve which schema's base tables the catalog is derived from.
+builder.Services.AddScoped<IDatasetAllowlist, DatasetAllowlist>();
+// Story 11.3 (FR-72 / AR-63) — read-only LIMIT-10 query preview. The connection factory
+// reads the dedicated `formforge_preview` connection string, which owns its own bounded
+// Npgsql pool; the per-request service is scoped like IDatasetService.
+// Story 12.6 — Scoped (not Singleton): PreviewConnectionFactory now reads the scoped
+// ITenantContext at connection-open time to target the tenant's own dataset namespace.
+builder.Services.AddScoped<IPreviewConnectionFactory, PreviewConnectionFactory>();
 builder.Services.AddScoped<IPreviewService, PreviewService>();
 // Dataset-backed Dropdown source — serves a dataset VIEW's columns (inspector) and
 // its {value,label} options (runtime). Auth-only via the privileged pool; scoped

@@ -3,6 +3,7 @@ using Dapper;
 using FormForge.Api.Features.Designer.Dtos;
 using FormForge.Api.Features.Provisioning;
 using FormForge.Api.Features.SchemaRegistry;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -33,8 +34,13 @@ internal sealed class SchemaDriftService(
     FormForgeDbContext db,
     DbConnectionFactory connectionFactory,
     DdlEmitter ddlEmitter,
-    ISchemaRegistry schemaRegistry)
+    ISchemaRegistry schemaRegistry,
+    ITenantContext tenantContext)
 {
+    // Story 12.6 — the requesting tenant's own schema (or `public` when no tenant is
+    // resolved). Provisioned CRUD tables live in this schema, not a fixed `public` literal.
+    private string Schema => tenantContext.SchemaName ?? "public";
+
     // Returns null when the designerId itself is not a valid identifier — the
     // caller maps this to 404. Returns an empty list when the table doesn't
     // exist yet (a designer that has never been bound / provisioned).
@@ -59,13 +65,13 @@ internal sealed class SchemaDriftService(
             const string existingSql = """
                 SELECT column_name AS ColumnName, data_type AS DataType
                 FROM information_schema.columns
-                WHERE table_schema = 'public'
+                WHERE table_schema = @schema
                   AND table_name = @tableName
                 ORDER BY ordinal_position
                 """;
             var existing = (await connection.QueryAsync<ExistingColumn>(
                 existingSql,
-                new { tableName = tableName.Value },
+                new { schema = Schema, tableName = tableName.Value },
                 commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
                 .ConfigureAwait(false))
                 .ToList();
@@ -193,35 +199,35 @@ internal sealed class SchemaDriftService(
         return columns.Select(c => c.ColumnName).ToHashSet(StringComparer.Ordinal);
     }
 
-    private static async Task<bool> TableExistsAsync(
+    private async Task<bool> TableExistsAsync(
         Npgsql.NpgsqlConnection connection, string tableName)
     {
         const string sql = """
             SELECT COUNT(1) > 0
             FROM information_schema.tables
-            WHERE table_schema = 'public'
+            WHERE table_schema = @schema
               AND table_name = @tableName
             """;
         return await connection.ExecuteScalarAsync<bool>(
             sql,
-            new { tableName },
+            new { schema = Schema, tableName },
             commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false);
     }
 
-    private static async Task<bool> ColumnExistsAsync(
+    private async Task<bool> ColumnExistsAsync(
         Npgsql.NpgsqlConnection connection, string tableName, string columnName)
     {
         const string sql = """
             SELECT COUNT(1) > 0
             FROM information_schema.columns
-            WHERE table_schema = 'public'
+            WHERE table_schema = @schema
               AND table_name = @tableName
               AND column_name = @columnName
             """;
         return await connection.ExecuteScalarAsync<bool>(
             sql,
-            new { tableName, columnName },
+            new { schema = Schema, tableName, columnName },
             commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false);
     }

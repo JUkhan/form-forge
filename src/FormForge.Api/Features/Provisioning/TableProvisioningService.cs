@@ -3,6 +3,7 @@ using FormForge.Api.Common;
 using FormForge.Api.Features.Designer;
 using FormForge.Api.Features.Provisioning.Dtos;
 using FormForge.Api.Features.SchemaRegistry;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -36,8 +37,13 @@ internal sealed class TableProvisioningService(
     FormForgeDbContext db,
     DbConnectionFactory connectionFactory,
     CycleDetector cycleDetector,
-    IProvisioningService provisioning)
+    IProvisioningService provisioning,
+    ITenantContext tenantContext)
 {
+    // Story 12.6 — the requesting tenant's own schema (or `public` when no tenant is
+    // resolved). Provisioned CRUD tables live in this schema, not a fixed `public` literal.
+    private string Schema => tenantContext.SchemaName ?? "public";
+
     public async Task<PagedResult<TableProvisioningItem>> ListAsync(
         int page, int pageSize, string? search, CancellationToken ct)
     {
@@ -206,21 +212,22 @@ internal sealed class TableProvisioningService(
         return new ProvisionTableResult(ProvisionTableOutcome.Success);
     }
 
-    // Names of every base table in the public schema. Designer tables are named
-    // after their designerId, so membership == "table is provisioned".
+    // Names of every base table in the tenant's own schema (or `public` when no tenant
+    // is resolved). Designer tables are named after their designerId, so membership ==
+    // "table is provisioned".
     private async Task<HashSet<string>> GetExistingTableNamesAsync(CancellationToken ct)
     {
         const string sql = """
             SELECT table_name
             FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+            WHERE table_schema = @schema AND table_type = 'BASE TABLE'
             """;
 
         var connection = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
             var names = await connection
-                .QueryAsync<string>(new CommandDefinition(sql, cancellationToken: ct))
+                .QueryAsync<string>(new CommandDefinition(sql, new { schema = Schema }, cancellationToken: ct))
                 .ConfigureAwait(false);
             return new HashSet<string>(names, StringComparer.Ordinal);
         }

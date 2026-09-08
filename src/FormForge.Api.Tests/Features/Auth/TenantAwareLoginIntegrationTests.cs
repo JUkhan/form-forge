@@ -17,7 +17,10 @@ namespace FormForge.Api.Tests.Features.Auth;
 // schema-scoped credential check and stamps the JWT with tenantId; no match falls back
 // to the pre-existing public.users check unchanged (proved by
 // Login_EmailNotInTenantUserIndex_FallsBackToLegacyPublicUsersCheck coexisting with a
-// real tenant row); RefreshAsync's accepted gap for tenant users is exercised end-to-end.
+// real tenant row). Story 12.6 closed the refresh/logout accepted gap (the
+// "{tenantId}.{secret}" cookie Decision) — Refresh_TenantUserToken_... and
+// Logout_TenantUserToken_... below now exercise the end-to-end success path instead of
+// the old NotFound/safe-no-op gap.
 // Real Testcontainers Postgres throughout (via ITenantProvisioningService for the schema
 // + full migration replay), matching TenantProvisioningServiceTests' "no mocks" posture.
 [SuppressMessage("Reliability", "CA2000",
@@ -259,8 +262,13 @@ public sealed class TenantAwareLoginIntegrationTests : IClassFixture<PostgresFix
         Assert.DoesNotContain(jwt.Claims, c => c.Type == "tenantId");
     }
 
+    // Story 12.6 — closes the Story 12.3 accepted gap: the refresh-token cookie now
+    // encodes "{tenantId}.{secret}" (Decision), so RefreshAsync can resolve the tenant's
+    // own schema and find the row IssueLoginTokensAsync wrote there. Refresh now
+    // succeeds end-to-end for a tenant user, and the rotated access token still carries
+    // the tenantId claim.
     [Fact]
-    public async Task Refresh_TenantUserToken_Returns401_ForcesRelogin()
+    public async Task Refresh_TenantUserToken_Returns200_RotatesTokens_AndJwtCarriesTenantId()
     {
         var tenant = await ProvisionTenantAsync("tenant_login_refresh");
         await SeedTenantUserAsync(tenant.SchemaName, tenant.Id, "admin@tenant-refresh.example", "Password1!");
@@ -270,27 +278,28 @@ public sealed class TenantAwareLoginIntegrationTests : IClassFixture<PostgresFix
         loginResponse.EnsureSuccessStatusCode();
         var loginBody = await loginResponse.Content.ReadFromJsonAsync<LoginResponseDto>();
         Assert.NotNull(loginBody);
+        Assert.StartsWith($"{tenant.Id}.", loginBody!.RefreshToken, StringComparison.Ordinal);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/refresh");
-        request.Headers.Add("Cookie", $"refresh_token={loginBody!.RefreshToken}");
+        request.Headers.Add("Cookie", $"refresh_token={loginBody.RefreshToken}");
         using var response = await _client!.SendAsync(request);
 
-        // Story 12.3 Design Notes / I/O matrix — accepted gap: the refresh token was
-        // persisted into the tenant schema's own refresh_tokens table (via the
-        // schema-scoped context IssueLoginTokensAsync used), so the unmodified
-        // public-schema RefreshAsync lookup can't find it and returns NotFound.
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        var body = await response.Content.ReadAsStringAsync();
-        Assert.Contains("REFRESH_TOKEN_INVALID", body, StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<LoginResponseDto>();
+        Assert.NotNull(body);
+        Assert.StartsWith($"{tenant.Id}.", body!.RefreshToken, StringComparison.Ordinal);
+        Assert.NotEqual(loginBody.RefreshToken, body.RefreshToken);
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(body.AccessToken);
+        var tenantIdClaim = jwt.Claims.FirstOrDefault(c => c.Type == "tenantId");
+        Assert.NotNull(tenantIdClaim);
+        Assert.Equal(tenant.Id.ToString(), tenantIdClaim!.Value);
     }
 
-    // Post-review — the same root cause (an opaque refresh-token cookie, no email/
-    // tenantId to resolve which tenant schema to look in) applies to LogoutAsync too.
-    // Unlike RefreshAsync, LogoutAsync's NotFound-equivalent path (no matching row in
-    // public.refresh_tokens) is a NoOp, not an error — the endpoint still returns 204
-    // and clears the cookie. This proves the gap degrades safely rather than breaking.
+    // Story 12.6 — same closed gap applies to LogoutAsync: the tenant-schema token is
+    // now actually resolved and revoked server-side, not just safely ignored.
     [Fact]
-    public async Task Logout_TenantUserToken_Returns204_SafeNoOp()
+    public async Task Logout_TenantUserToken_Returns204_AndRevokesTokenInTenantSchema()
     {
         var tenant = await ProvisionTenantAsync("tenant_login_logout");
         await SeedTenantUserAsync(tenant.SchemaName, tenant.Id, "admin@tenant-logout.example", "Password1!");
@@ -306,6 +315,13 @@ public sealed class TenantAwareLoginIntegrationTests : IClassFixture<PostgresFix
         using var response = await _client!.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var csb = new NpgsqlConnectionStringBuilder(_postgres.ConnectionString) { SearchPath = tenant.SchemaName };
+        await using var tenantConnection = new NpgsqlConnection(csb.ConnectionString);
+        var options = new DbContextOptionsBuilder<FormForgeDbContext>().UseNpgsql(tenantConnection).Options;
+        await using var tenantDb = new FormForgeDbContext(options);
+        var token = await tenantDb.RefreshTokens.AsNoTracking().SingleAsync();
+        Assert.NotNull(token.RevokedAt);
     }
 
     [SuppressMessage("Performance", "CA1812",

@@ -226,7 +226,7 @@ public sealed class DatasetViewLifecycleTests : IClassFixture<PostgresFixture>, 
         Assert.True(entry.Succeeded);
         Assert.Equal("audit_success_ds", entry.DatasetName);
         Assert.StartsWith(
-            "CREATE VIEW datasets.\"audit_success_ds\"", entry.Ddl, StringComparison.Ordinal);
+            "CREATE VIEW \"datasets\".\"audit_success_ds\"", entry.Ddl, StringComparison.Ordinal);
         Assert.Equal(_adminUserId, entry.ActorId);
         Assert.Equal(knownCorrelationId, entry.CorrelationId);
     }
@@ -258,7 +258,7 @@ public sealed class DatasetViewLifecycleTests : IClassFixture<PostgresFixture>, 
         Assert.False(entry.Succeeded);
         Assert.Equal("datasetname_failure", entry.DatasetName);
         Assert.Contains(
-            "CREATE VIEW datasets.\"datasetname_failure\"", entry.Ddl, StringComparison.Ordinal);
+            "CREATE VIEW \"datasets\".\"datasetname_failure\"", entry.Ddl, StringComparison.Ordinal);
         Assert.Equal(_adminUserId, entry.ActorId);
     }
 

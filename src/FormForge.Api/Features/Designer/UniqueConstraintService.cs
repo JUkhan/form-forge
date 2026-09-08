@@ -3,6 +3,7 @@ using System.Text;
 using Dapper;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Designer.Dtos;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -53,8 +54,13 @@ internal enum DropUniqueConstraintOutcome
 internal sealed partial class UniqueConstraintService(
     FormForgeDbContext db,
     DbConnectionFactory connectionFactory,
+    ITenantContext tenantContext,
     ILogger<UniqueConstraintService> logger)
 {
+    // Story 12.6 — the requesting tenant's own schema (or `public` when no tenant is
+    // resolved). Provisioned CRUD tables live in this schema, not a fixed `public` literal.
+    private string Schema => tenantContext.SchemaName ?? "public";
+
     // A composite UNIQUE constraint spanning more than this many columns is almost
     // certainly a mistake; cap it so the UI and DDL stay sane.
     private const int MaxColumns = 8;
@@ -105,7 +111,7 @@ internal sealed partial class UniqueConstraintService(
             .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
 
         // Which physical tables actually exist (table name == designerId).
-        var existingTables = await GetExistingTableNamesAsync(ct).ConfigureAwait(false);
+        var existingTables = await GetExistingTableNamesAsync(Schema, ct).ConfigureAwait(false);
 
         var designers = crudDesigners
             .Where(d => existingTables.Contains(d.DesignerId))
@@ -130,22 +136,22 @@ internal sealed partial class UniqueConstraintService(
         return new ProvisionedDesignersResponse(designers);
     }
 
-    // Names of every base table in the public schema. Designer tables are named
+    // Names of every base table in the tenant's own schema. Designer tables are named
     // after their designerId, so membership == "table is provisioned". Mirrors
     // TableProvisioningService.GetExistingTableNamesAsync.
-    private async Task<HashSet<string>> GetExistingTableNamesAsync(CancellationToken ct)
+    private async Task<HashSet<string>> GetExistingTableNamesAsync(string schema, CancellationToken ct)
     {
         const string sql = """
             SELECT table_name
             FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+            WHERE table_schema = @schema AND table_type = 'BASE TABLE'
             """;
 
         var connection = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
             var names = await connection
-                .QueryAsync<string>(new CommandDefinition(sql, cancellationToken: ct))
+                .QueryAsync<string>(new CommandDefinition(sql, new { schema }, cancellationToken: ct))
                 .ConfigureAwait(false);
             return new HashSet<string>(names, StringComparer.Ordinal);
         }
@@ -441,17 +447,17 @@ internal sealed partial class UniqueConstraintService(
         return baseName;
     }
 
-    private static async Task<bool> TableExistsAsync(NpgsqlConnection connection, string tableName)
+    private async Task<bool> TableExistsAsync(NpgsqlConnection connection, string tableName)
     {
         const string sql = """
             SELECT COUNT(1) > 0
             FROM information_schema.tables
-            WHERE table_schema = 'public'
+            WHERE table_schema = @schema
               AND table_name = @tableName
             """;
         return await connection.ExecuteScalarAsync<bool>(
             sql,
-            new { tableName },
+            new { schema = Schema, tableName },
             commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false);
     }
@@ -459,19 +465,19 @@ internal sealed partial class UniqueConstraintService(
     // Constrainable columns: every physical column except those in
     // NonConstrainableColumns (the `id` primary key and audit / soft-delete / cascade
     // bookkeeping columns). parent_*_id FK columns are intentionally included.
-    private static async Task<List<UserColumn>> GetUserColumnsAsync(
+    private async Task<List<UserColumn>> GetUserColumnsAsync(
         NpgsqlConnection connection, string tableName)
     {
         const string sql = """
             SELECT column_name AS ColumnName, data_type AS DataType
             FROM information_schema.columns
-            WHERE table_schema = 'public'
+            WHERE table_schema = @schema
               AND table_name = @tableName
             ORDER BY ordinal_position
             """;
         var all = await connection.QueryAsync<UserColumn>(
             sql,
-            new { tableName },
+            new { schema = Schema, tableName },
             commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false);
 
@@ -483,7 +489,7 @@ internal sealed partial class UniqueConstraintService(
     // All UNIQUE constraints on the table with their ordered column lists. Uses
     // pg_constraint (contype = 'u'); columns are resolved via pg_attribute and
     // ordered by their position in conkey.
-    private static async Task<List<UniqueConstraintInfo>> GetUniqueConstraintsAsync(
+    private async Task<List<UniqueConstraintInfo>> GetUniqueConstraintsAsync(
         NpgsqlConnection connection, string tableName)
     {
         const string sql = """
@@ -493,14 +499,14 @@ internal sealed partial class UniqueConstraintService(
             JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
             CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord)
             JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = u.attnum
-            WHERE nsp.nspname = 'public'
+            WHERE nsp.nspname = @schema
               AND rel.relname = @tableName
               AND con.contype = 'u'
             ORDER BY con.conname, u.ord
             """;
         var rows = await connection.QueryAsync<ConstraintColumnRow>(
             sql,
-            new { tableName },
+            new { schema = Schema, tableName },
             commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false);
 
@@ -515,7 +521,7 @@ internal sealed partial class UniqueConstraintService(
 
     // True if a constraint with this name exists on the table regardless of type
     // (used to distinguish "not found" from "found but not UNIQUE").
-    private static async Task<bool> ConstraintExistsAsync(
+    private async Task<bool> ConstraintExistsAsync(
         NpgsqlConnection connection, string tableName, string constraintName)
     {
         const string sql = """
@@ -523,13 +529,13 @@ internal sealed partial class UniqueConstraintService(
             FROM pg_constraint con
             JOIN pg_class rel ON rel.oid = con.conrelid
             JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
-            WHERE nsp.nspname = 'public'
+            WHERE nsp.nspname = @schema
               AND rel.relname = @tableName
               AND con.conname = @constraintName
             """;
         return await connection.ExecuteScalarAsync<bool>(
             sql,
-            new { tableName, constraintName },
+            new { schema = Schema, tableName, constraintName },
             commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false);
     }

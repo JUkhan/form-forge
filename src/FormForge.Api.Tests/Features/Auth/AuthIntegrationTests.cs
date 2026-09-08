@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using FormForge.Api.Domain.Entities;
+using FormForge.Api.Features.Auth;
 using FormForge.Api.Infrastructure.Persistence;
 using FormForge.Api.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
@@ -433,11 +434,20 @@ public sealed class AuthIntegrationTests : IClassFixture<PostgresFixture>, IAsyn
         return (body!.AccessToken, body.RefreshToken);
     }
 
-    private static string HashTokenForTest(string raw) =>
-        Convert.ToHexString(
+    // Story 12.6 (Decision) — the refresh-token cookie value is now
+    // "{tenantId}.{secret}" (here always ".{secret}": this suite logs in against
+    // public.users, which has no tenantId). RefreshTokens.TokenHash only ever hashes
+    // the secret half, so it must be extracted via the same internal
+    // AuthService.ExtractRefreshTokenSecret the production code uses before hashing,
+    // or these DB-state assertions would never find the row.
+    private static string HashTokenForTest(string raw)
+    {
+        var secret = AuthService.ExtractRefreshTokenSecret(raw) ?? raw;
+        return Convert.ToHexString(
                 System.Security.Cryptography.SHA256.HashData(
-                    System.Text.Encoding.UTF8.GetBytes(raw)))
+                    System.Text.Encoding.UTF8.GetBytes(secret)))
             .ToLowerInvariant();
+    }
 
     private static async Task SeedTestUserAsync(FormForgeDbContext db)
     {

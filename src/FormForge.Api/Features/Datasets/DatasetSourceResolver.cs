@@ -48,11 +48,18 @@ internal static class DatasetSourceResolver
 
     // requireParameterValues: when true (execution paths) a parameterized dataset missing a
     // placeholder value returns MissingParameters; when false (pure column discovery for the
-    // inspector) the columns are still returned and the missing values are ignored.
+    // inspector) the columns are still returned and the missing values are ignored. No default
+    // value (CA1068 — CancellationToken must be the last parameter, so every optional-looking
+    // parameter ahead of it must be explicit at the call site instead).
+    //
+    // Story 12.6 — datasetsSchema names the tenant's own `{schema}_datasets` namespace
+    // (Story 12.7's naming) or the legacy global `datasets` schema when no tenant is
+    // resolved; callers resolve it from ITenantContext and pass it in (this class is
+    // static/connection-agnostic, so it cannot read ITenantContext itself).
     internal static async Task<DatasetSourceResolution> ResolveAsync(
         NpgsqlConnection conn, Guid datasetId, string? queryParametersJson,
-        bool allowParameterized, int timeout, CancellationToken ct,
-        bool requireParameterValues = true)
+        bool allowParameterized, int timeout, string datasetsSchema,
+        bool requireParameterValues, CancellationToken ct)
     {
         var row = await conn.QuerySingleOrDefaultAsync<DatasetRow>(new CommandDefinition(
             """
@@ -61,13 +68,13 @@ internal static class DatasetSourceResolver
             """,
             new { id = datasetId }, commandTimeout: timeout, cancellationToken: ct)).ConfigureAwait(false);
         return await BuildAsync(conn, row, queryParametersJson, allowParameterized,
-            requireParameterValues, timeout, ct).ConfigureAwait(false);
+            requireParameterValues, timeout, datasetsSchema, ct).ConfigureAwait(false);
     }
 
     internal static async Task<DatasetSourceResolution> ResolveByNameAsync(
         NpgsqlConnection conn, DatasetName name, string? queryParametersJson,
-        bool allowParameterized, int timeout, CancellationToken ct,
-        bool requireParameterValues = true)
+        bool allowParameterized, int timeout, string datasetsSchema,
+        bool requireParameterValues, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(name);
         var row = await conn.QuerySingleOrDefaultAsync<DatasetRow>(new CommandDefinition(
@@ -77,12 +84,13 @@ internal static class DatasetSourceResolver
             """,
             new { name = name.Value }, commandTimeout: timeout, cancellationToken: ct)).ConfigureAwait(false);
         return await BuildAsync(conn, row, queryParametersJson, allowParameterized,
-            requireParameterValues, timeout, ct).ConfigureAwait(false);
+            requireParameterValues, timeout, datasetsSchema, ct).ConfigureAwait(false);
     }
 
     private static async Task<DatasetSourceResolution> BuildAsync(
         NpgsqlConnection conn, DatasetRow? row, string? queryParametersJson,
-        bool allowParameterized, bool requireParameterValues, int timeout, CancellationToken ct)
+        bool allowParameterized, bool requireParameterValues, int timeout,
+        string datasetsSchema, CancellationToken ct)
     {
         if (row is null || !DatasetName.TryCreate(row.DatasetName, out var name, out _))
             return new DatasetSourceResolution(DatasetSourceOutcome.NotFound);
@@ -90,12 +98,12 @@ internal static class DatasetSourceResolver
         // ── view-type: read from the backing VIEW, columns from information_schema ──
         if (row.QueryType != DatasetQueryTypes.Query)
         {
-            var viewCols = await GetViewColumnsAsync(conn, name!, timeout, ct).ConfigureAwait(false);
+            var viewCols = await GetViewColumnsAsync(conn, name!, datasetsSchema, timeout, ct).ConfigureAwait(false);
             if (viewCols.Order.Count == 0)
                 return new DatasetSourceResolution(DatasetSourceOutcome.NotFound);
             return Ok(new DatasetResolvedSource(
                 name!, DatasetQueryTypes.View, IsParameterized: false,
-                Relation: $"datasets.{QuoteIdentifier(name!.Value)}",
+                Relation: $"{QuoteIdentifier(datasetsSchema)}.{QuoteIdentifier(name!.Value)}",
                 WithClause: string.Empty, CteDefinition: string.Empty,
                 NamedParameters: [], viewCols.Order, viewCols.Types));
         }
@@ -184,16 +192,16 @@ internal static class DatasetSourceResolver
     }
 
     private static async Task<ColumnSet> GetViewColumnsAsync(
-        NpgsqlConnection conn, DatasetName name, int timeout, CancellationToken ct)
+        NpgsqlConnection conn, DatasetName name, string datasetsSchema, int timeout, CancellationToken ct)
     {
         var rows = await conn.QueryAsync<(string ColumnName, string DataType)>(new CommandDefinition(
             """
             SELECT column_name AS "ColumnName", data_type AS "DataType"
             FROM information_schema.columns
-            WHERE table_schema = 'datasets' AND table_name = @name
+            WHERE table_schema = @schema AND table_name = @name
             ORDER BY ordinal_position
             """,
-            new { name = name.Value }, commandTimeout: timeout, cancellationToken: ct)).ConfigureAwait(false);
+            new { schema = datasetsSchema, name = name.Value }, commandTimeout: timeout, cancellationToken: ct)).ConfigureAwait(false);
 
         var order = new List<string>();
         var types = new Dictionary<string, string>(StringComparer.Ordinal);

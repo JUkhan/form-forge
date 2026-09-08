@@ -4,6 +4,7 @@ using FormForge.Api.Common;
 using FormForge.Api.Domain.ValueTypes;
 using FormForge.Api.Features.Datasets.Dtos;
 using FormForge.Api.Features.DynamicCrud;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 
 namespace FormForge.Api.Features.Datasets;
@@ -72,10 +73,14 @@ internal interface IDatasetDropdownService
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812",
     Justification = "Registered via DI.")]
-internal sealed class DatasetDropdownService(DbConnectionFactory connectionFactory)
+internal sealed class DatasetDropdownService(DbConnectionFactory connectionFactory, ITenantContext tenantContext)
     : IDatasetDropdownService
 {
     private const int CommandTimeoutSeconds = 5;
+
+    // Story 12.6 — the tenant's own `{schema}_datasets` namespace, or the legacy
+    // global `datasets` schema when no tenant is resolved.
+    private string DatasetsSchema => TenantDatasetSchemaResolver.Resolve(tenantContext);
 
     public async Task<DatasetColumnsDto?> GetColumnsAsync(Guid datasetId, CancellationToken ct)
     {
@@ -87,7 +92,7 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
             // values are not required since columns come from a schema probe.
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, queryParametersJson: null, allowParameterized: true,
-                CommandTimeoutSeconds, ct, requireParameterValues: false).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: false, ct).ConfigureAwait(false);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
                 return null;
             var src = resolved.Source!;
@@ -108,7 +113,7 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         {
             var resolved = await DatasetSourceResolver.ResolveByNameAsync(
                 conn, name, queryParametersJson: null, allowParameterized: true,
-                CommandTimeoutSeconds, ct, requireParameterValues: false).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: false, ct).ConfigureAwait(false);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
                 return null;
             var src = resolved.Source!;
@@ -143,7 +148,7 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
             // Dropdown options reject parameterized queries (palette-only): allowParameterized=false.
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, queryParametersJson: null, allowParameterized: false,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             var mapped = MapNonOk(resolved);
             if (mapped is not null)
                 return mapped;
@@ -191,7 +196,7 @@ internal sealed class DatasetDropdownService(DbConnectionFactory connectionFacto
         {
             var resolved = await DatasetSourceResolver.ResolveByNameAsync(
                 conn, name, queryParametersJson: null, allowParameterized: false,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             var mapped = MapNonOk(resolved);
             if (mapped is not null)
                 return mapped;

@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using Dapper;
 using FormForge.Api.Features.Datasets.Dtos;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.Extensions.Caching.Memory;
 
@@ -42,7 +44,7 @@ internal interface IDatasetAllowlist
 internal sealed partial class DatasetAllowlist : IDatasetAllowlist
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
-    private const string CacheKey = "datasets.catalog";
+    private const string CacheKeyPrefix = "datasets.catalog";
 
     // Built-in framework + internal tables that must NEVER be exposed as dataset sources,
     // even though they live in the `public` schema (AR-57). This is the SECURITY FLOOR and
@@ -90,17 +92,20 @@ internal sealed partial class DatasetAllowlist : IDatasetAllowlist
     private readonly ReadOnlyCollection<string> _configRestrictList;
     private readonly IMemoryCache _cache;
     private readonly DbConnectionFactory _db;
+    private readonly ITenantContext _tenantContext;
     private readonly ILogger<DatasetAllowlist> _logger;
 
     public DatasetAllowlist(
         IConfiguration configuration,
         IMemoryCache cache,
         DbConnectionFactory db,
+        ITenantContext tenantContext,
         ILogger<DatasetAllowlist> logger)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         _cache = cache;
         _db = db;
+        _tenantContext = tenantContext;
         _logger = logger;
 
         // Operator-configured extra exclusions, unioned onto the hardcoded floor.
@@ -138,6 +143,16 @@ internal sealed partial class DatasetAllowlist : IDatasetAllowlist
         !_excludedTables.Contains(tableName)
         && (_configRestrictList.Count == 0 || _configRestrictList.Contains(tableName, StringComparer.Ordinal));
 
+    // Story 12.6 — the requesting tenant's own schema (or `public` when no tenant is
+    // resolved). The catalog is derived from THIS schema's base tables, not a fixed
+    // `public` literal — a tenant's Designer-provisioned tables live in their own schema.
+    private string TenantSchema => _tenantContext.SchemaName ?? "public";
+
+    // Cache key includes the resolved schema so two tenants (or a tenant and the
+    // platform/public catalog) never share a cached catalog entry.
+    private string CacheKey =>
+        string.Create(CultureInfo.InvariantCulture, $"{CacheKeyPrefix}.{TenantSchema}");
+
     public async Task<CatalogDto> GetCatalogAsync(CancellationToken ct)
     {
         return await _cache.GetOrCreateAsync(
@@ -151,24 +166,26 @@ internal sealed partial class DatasetAllowlist : IDatasetAllowlist
 
     private async Task<CatalogDto> BuildCatalogAsync(CancellationToken ct)
     {
+        var schema = TenantSchema;
+
         // Manual try/finally rather than `await using` because this project enforces
         // CA2007 and a bare `await using` flags it (mirrors DatasetService.GetByIdAsync).
         var conn = await _db.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            // Step 1 — discover every base table in the public schema, then drop the
+            // Step 1 — discover every base table in the tenant's own schema, then drop the
             // framework/internal tables. The remainder is the dynamic allowlist (every
             // Designer-provisioned table appears automatically). VIEWs are excluded, so a
             // dataset's own backing view is never offered as a join source.
             const string tablesSql = """
                 SELECT table_name
                 FROM   information_schema.tables
-                WHERE  table_schema = 'public'
+                WHERE  table_schema = @schema
                   AND  table_type   = 'BASE TABLE'
                 """;
 
             var discovered = await conn.QueryAsync<string>(
-                new CommandDefinition(tablesSql, cancellationToken: ct)).ConfigureAwait(false);
+                new CommandDefinition(tablesSql, new { schema }, cancellationToken: ct)).ConfigureAwait(false);
 
             IEnumerable<string> allowed = discovered.Where(t => !_excludedTables.Contains(t));
 
@@ -201,7 +218,7 @@ internal sealed partial class DatasetAllowlist : IDatasetAllowlist
             const string countsSql = """
                 SELECT table_name AS "TableName", count(*)::int AS "ColumnCount"
                 FROM   information_schema.columns
-                WHERE  table_schema = 'public'
+                WHERE  table_schema = @schema
                   AND  table_name   = ANY(@allowlist)
                 GROUP  BY table_name
                 ORDER  BY table_name
@@ -209,7 +226,7 @@ internal sealed partial class DatasetAllowlist : IDatasetAllowlist
 
             var tables = (await conn.QueryAsync<CatalogTableDto>(
                 new CommandDefinition(countsSql,
-                    parameters: new { allowlist = allowedNames.ToArray() },
+                    parameters: new { schema, allowlist = allowedNames.ToArray() },
                     cancellationToken: ct))
                 .ConfigureAwait(false))
                 // For column-restricted tables, report the exposed column count (not the raw
@@ -238,6 +255,7 @@ internal sealed partial class DatasetAllowlist : IDatasetAllowlist
         if (!IsAllowed(tableName))
             return null;
 
+        var schema = TenantSchema;
         var conn = await _db.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
@@ -246,13 +264,13 @@ internal sealed partial class DatasetAllowlist : IDatasetAllowlist
                        data_type   AS "PgType",
                        is_nullable AS "IsNullable"
                 FROM   information_schema.columns
-                WHERE  table_schema = 'public'
+                WHERE  table_schema = @schema
                   AND  table_name   = @table
                 ORDER  BY ordinal_position
                 """;
 
             var columns = (await conn.QueryAsync<CatalogColumnRow>(
-                new CommandDefinition(sql, new { table = tableName }, cancellationToken: ct))
+                new CommandDefinition(sql, new { schema, table = tableName }, cancellationToken: ct))
                 .ConfigureAwait(false))
                 .Select(r => new CatalogColumnDto(
                     r.ColumnName,

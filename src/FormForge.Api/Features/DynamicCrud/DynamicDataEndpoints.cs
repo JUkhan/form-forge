@@ -11,6 +11,7 @@ using FormForge.Api.Features.Designer;
 using FormForge.Api.Features.Permissions;
 using FormForge.Api.Features.Provisioning;
 using FormForge.Api.Features.SchemaRegistry;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -401,6 +402,7 @@ internal static class DynamicDataEndpoints
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
         IDatasetRowQueryService datasetRowQueryService,
+        ITenantContext tenantContext,
         CancellationToken ct,
         string? parentId = null,
         int page = 1,
@@ -419,6 +421,8 @@ internal static class DynamicDataEndpoints
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(datasetRowQueryService);
+        ArgumentNullException.ThrowIfNull(tenantContext);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -460,10 +464,10 @@ internal static class DynamicDataEndpoints
             // or hitting the endpoint before the host is bound). Self-heal by adding the
             // self-FK on demand (idempotent), then re-check. Without it the
             // parent_<table>_id predicate below would be a 42703.
-            if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+            if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
             {
                 await ddlEmitter.EnsureSelfReferenceColumnAsync(safeId!.Value, ct).ConfigureAwait(false);
-                if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+                if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
                     return Problems.ValidationFailed(
                         "This designer is not configured as a TreeView tree (no self-reference column).");
             }
@@ -506,6 +510,7 @@ internal static class DynamicDataEndpoints
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
         IDatasetRowQueryService datasetRowQueryService,
+        ITenantContext tenantContext,
         CancellationToken ct,
         string? parentId = null,
         string? authFilterColumn = null,
@@ -518,6 +523,8 @@ internal static class DynamicDataEndpoints
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(datasetRowQueryService);
+        ArgumentNullException.ThrowIfNull(tenantContext);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -560,10 +567,10 @@ internal static class DynamicDataEndpoints
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+            if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
             {
                 await ddlEmitter.EnsureSelfReferenceColumnAsync(safeId!.Value, ct).ConfigureAwait(false);
-                if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+                if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
                     // No self-FK and none could be created → the node has no descendants.
                     return Results.Ok(new TreeDescendantsResult(Array.Empty<string>()));
             }
@@ -593,6 +600,7 @@ internal static class DynamicDataEndpoints
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
         IDatasetRowQueryService datasetRowQueryService,
+        ITenantContext tenantContext,
         CancellationToken ct,
         string? ids = null,
         string? authFilterColumn = null,
@@ -605,6 +613,8 @@ internal static class DynamicDataEndpoints
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(datasetRowQueryService);
+        ArgumentNullException.ThrowIfNull(tenantContext);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -653,10 +663,10 @@ internal static class DynamicDataEndpoints
         var conn = await connectionFactory.CreateOpenConnectionAsync(ct).ConfigureAwait(false);
         try
         {
-            if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+            if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
             {
                 await ddlEmitter.EnsureSelfReferenceColumnAsync(safeId!.Value, ct).ConfigureAwait(false);
-                if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+                if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
                     // No self-FK → the nodes are flat, so they have no ancestors.
                     return Results.Ok(new TreeAncestorsResult(Array.Empty<string>()));
             }
@@ -688,6 +698,7 @@ internal static class DynamicDataEndpoints
         DbConnectionFactory connectionFactory,
         DdlEmitter ddlEmitter,
         IDatasetRowQueryService datasetRowQueryService,
+        ITenantContext tenantContext,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
@@ -695,7 +706,9 @@ internal static class DynamicDataEndpoints
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(datasetRowQueryService);
+        ArgumentNullException.ThrowIfNull(tenantContext);
         ArgumentNullException.ThrowIfNull(request);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -757,10 +770,10 @@ internal static class DynamicDataEndpoints
         {
             // Self-heal the self-FK on demand (same as ListTreeNodesHandler) — without it the
             // recursive walk's parent_<table>_id reference would be a 42703.
-            if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+            if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
             {
                 await ddlEmitter.EnsureSelfReferenceColumnAsync(safeId!.Value, ct).ConfigureAwait(false);
-                if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+                if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
                     return Problems.ValidationFailed(
                         "This designer is not configured as a TreeView tree (no self-reference column).");
             }
@@ -797,6 +810,7 @@ internal static class DynamicDataEndpoints
         DbConnectionFactory connectionFactory,
         IDynamicPayloadValidator payloadValidator,
         DdlEmitter ddlEmitter,
+        ITenantContext tenantContext,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
@@ -804,6 +818,8 @@ internal static class DynamicDataEndpoints
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(payloadValidator);
+        ArgumentNullException.ThrowIfNull(tenantContext);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -897,10 +913,10 @@ internal static class DynamicDataEndpoints
         {
             // Self-heal the self-FK on demand if a TreeView host hasn't provisioned it yet
             // (idempotent), then re-check. See the matching note in ListTreeNodesHandler.
-            if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+            if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
             {
                 await ddlEmitter.EnsureSelfReferenceColumnAsync(safeId!.Value, ct).ConfigureAwait(false);
-                if (!await TableHasColumnAsync(conn, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
+                if (!await TableHasColumnAsync(conn, schema, safeId!.Value, fkColumnName, ct).ConfigureAwait(false))
                     return Problems.ValidationFailed(
                         "This designer is not configured as a TreeView tree (no self-reference column).");
             }
@@ -2344,13 +2360,13 @@ internal static class DynamicDataEndpoints
     // TreeView-declared self-FK (parent_<table>_id) on a table whose own RootElement
     // does not declare it, so the soft-delete cascade can inject the self-edge.
     private static async Task<bool> TableHasColumnAsync(
-        NpgsqlConnection conn, string tableName, string columnName, CancellationToken ct)
+        NpgsqlConnection conn, string schema, string tableName, string columnName, CancellationToken ct)
     {
         const string sql =
             "SELECT EXISTS(SELECT 1 FROM information_schema.columns " +
-            "WHERE table_schema = 'public' AND table_name = @t AND column_name = @c)";
+            "WHERE table_schema = @schema AND table_name = @t AND column_name = @c)";
         return await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-            sql, new { t = tableName, c = columnName }, commandTimeout: 5, cancellationToken: ct))
+            sql, new { schema, t = tableName, c = columnName }, commandTimeout: 5, cancellationToken: ct))
             .ConfigureAwait(false);
     }
 
@@ -2362,6 +2378,7 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         ILoggerFactory loggerFactory,
+        ITenantContext tenantContext,
         CancellationToken ct,
         // Optional per-component auth filter (TreeView): the row must be owned by the
         // requesting user, else 404 (never confirm another user's record id).
@@ -2372,6 +2389,8 @@ internal static class DynamicDataEndpoints
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(tenantContext);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -2419,7 +2438,7 @@ internal static class DynamicDataEndpoints
             // ON DELETE CASCADE is a hard-delete cascade only; soft-delete needs the
             // explicit walk in SoftDeleteCascade.ExecuteAsync below.)
             var selfFkColumn = DynamicQueryBuilder.BuildFkColumnName(safeId!.Value);
-            var isSelfRefTree = await TableHasColumnAsync(conn, safeId!.Value, selfFkColumn, ct)
+            var isSelfRefTree = await TableHasColumnAsync(conn, schema, safeId!.Value, selfFkColumn, ct)
                 .ConfigureAwait(false);
 
             IReadOnlyList<string> effectiveChildIds = entry.ChildRepeaterDesignerIds;
@@ -2617,12 +2636,15 @@ internal static class DynamicDataEndpoints
         FormForgeDbContext db,
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
+        ITenantContext tenantContext,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(db);
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
+        ArgumentNullException.ThrowIfNull(tenantContext);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -2668,7 +2690,7 @@ internal static class DynamicDataEndpoints
             // matching note in DeleteRecordHandler.) RestoreCascadeAsync matches rows by
             // cascade_event_id and ignores ChildIds, so the self node just needs to exist.
             var selfFkColumn = DynamicQueryBuilder.BuildFkColumnName(safeId!.Value);
-            var isSelfRefTree = await TableHasColumnAsync(conn, safeId!.Value, selfFkColumn, ct)
+            var isSelfRefTree = await TableHasColumnAsync(conn, schema, safeId!.Value, selfFkColumn, ct)
                 .ConfigureAwait(false);
 
             IReadOnlyList<string> effectiveChildIds = entry.ChildRepeaterDesignerIds;
@@ -2825,6 +2847,7 @@ internal static class DynamicDataEndpoints
         ISchemaRegistry schemaRegistry,
         DbConnectionFactory connectionFactory,
         IPermissionService permissionService,
+        ITenantContext tenantContext,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
@@ -2832,6 +2855,8 @@ internal static class DynamicDataEndpoints
         ArgumentNullException.ThrowIfNull(schemaRegistry);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentNullException.ThrowIfNull(permissionService);
+        ArgumentNullException.ThrowIfNull(tenantContext);
+        var schema = tenantContext.SchemaName ?? "public";
 
         if (!SafeIdentifier.TryCreate(designerId, out var safeId, out _))
             return Problems.ValidationFailed("Invalid designer identifier.");
@@ -2877,7 +2902,7 @@ internal static class DynamicDataEndpoints
             // Detect the TreeView self-FK (parent_<table>_id) and inject the self-edge so
             // a node's whole subtree is purged — identical reasoning to DeleteRecordHandler.
             var selfFkColumn = DynamicQueryBuilder.BuildFkColumnName(safeId!.Value);
-            var isSelfRefTree = await TableHasColumnAsync(conn, safeId!.Value, selfFkColumn, ct)
+            var isSelfRefTree = await TableHasColumnAsync(conn, schema, safeId!.Value, selfFkColumn, ct)
                 .ConfigureAwait(false);
 
             IReadOnlyList<string> effectiveChildIds = entry.ChildRepeaterDesignerIds;

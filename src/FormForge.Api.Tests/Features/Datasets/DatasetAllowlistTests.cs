@@ -1,4 +1,5 @@
 using FormForge.Api.Features.Datasets;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
@@ -29,7 +30,8 @@ public sealed class DatasetAllowlistTests : IDisposable
         return new DatasetAllowlist(
             config,
             cache,
-            new DbConnectionFactory(config),
+            new DbConnectionFactory(config, new TenantContext()),
+            new TenantContext(),
             NullLogger<DatasetAllowlist>.Instance);
     }
 

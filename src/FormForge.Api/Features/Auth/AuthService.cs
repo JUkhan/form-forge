@@ -4,6 +4,7 @@ using System.Text;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Auth.Dtos;
 using FormForge.Api.Features.Designer;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -102,7 +103,8 @@ internal sealed partial class AuthService(
     AuthMetrics metrics,
     ILogger<AuthService> logger,
     IMfaService mfaService,
-    IConfiguration configuration) : IAuthService
+    IConfiguration configuration,
+    ITenantLookupCache lookupCache) : IAuthService
 {
     // Refresh-token lifetime is configurable via Jwt:RefreshTokenTtlDays (default 7).
     private int RefreshTokenTtlDays => jwtOptions.Value.RefreshTokenTtlDays;
@@ -298,10 +300,13 @@ internal sealed partial class AuthService(
     // Story 12.3 — takes the FormForgeDbContext to write the refresh token against
     // (the injected public-schema `db` for the legacy path, or a tenant-schema-scoped
     // instance for a tenant-matched login) plus the optional tenantId to embed in the
-    // JWT claim. Writing a tenant user's refresh token into their own schema's
-    // refresh_tokens table (not public.refresh_tokens) is what makes RefreshAsync's
-    // unmodified public-schema lookup correctly return NotFound for them — the
-    // accepted gap this story's Design Notes call out.
+    // JWT claim.
+    // Story 12.6 (Decision) — the refresh-token cookie value is now
+    // "{tenantId}.{secret}" (tenantId "" for the legacy/platform-tenant-less path, so
+    // the cookie value is ".{secret}"); the secret half is the exact same random value
+    // hashed into RefreshTokens.TokenHash as before. This is what lets RefreshAsync/
+    // LogoutAsync resolve which schema's refresh_tokens table to query directly from
+    // the cookie, closing Story 12.3's accepted gap.
     private async Task<AuthServiceResult> IssueLoginTokensAsync(
         FormForgeDbContext context, User user, Guid? tenantId, CancellationToken ct)
     {
@@ -312,7 +317,7 @@ internal sealed partial class AuthService(
             .ConfigureAwait(false);
 
         var accessToken = jwtTokenService.CreateAccessToken(user, roleNames, tenantId);
-        var (rawToken, tokenHash) = GenerateRefreshToken();
+        var (secret, tokenHash) = GenerateRefreshToken();
 
         var refreshToken = new RefreshToken
         {
@@ -328,7 +333,7 @@ internal sealed partial class AuthService(
 
         var response = new LoginResponse(
             AccessToken: accessToken,
-            RefreshToken: rawToken,
+            RefreshToken: BuildRefreshCookieValue(tenantId, secret),
             ExpiresIn: ttlSeconds,
             User: new AuthenticatedUser(
                 UserId: user.Id,
@@ -365,107 +370,127 @@ internal sealed partial class AuthService(
     {
         ArgumentNullException.ThrowIfNull(rawToken);
 
-        var hash = HashToken(rawToken);
-
-        // Single round-trip: load token + user together.
-        var token = await db.RefreshTokens
-            .Include(r => r.User)
-            .FirstOrDefaultAsync(r => r.TokenHash == hash, ct)
-            .ConfigureAwait(false);
-
-        if (token is null)
+        var resolution = await ResolveRefreshCookieAsync(rawToken, ct).ConfigureAwait(false);
+        if (!resolution.IsValid)
         {
+            // Malformed prefix, unknown/non-Active tenant, or a legacy pre-migration
+            // cookie (no "." at all) — all collapse to the same NotFound envelope as
+            // an ordinary unmatched token (Story 12.6 I/O matrix).
             return new AuthRefreshResult(AuthRefreshOutcome.NotFound);
         }
 
-        if (token.RevokedAt is not null)
+        var effectiveDb = resolution.Scoped?.Db ?? db;
+        try
         {
-            // Possible refresh-token theft / out-of-order client retry. Spec AC-2:
-            // log Warning + record metric + return same envelope as generic-invalid.
-            // No PII in the log — only the hash prefix and opaque UserId.
-            RefreshTokenReplayDetected(logger, hash[..8], token.UserId);
-            metrics.RecordReplayed();
-            return new AuthRefreshResult(AuthRefreshOutcome.Replayed);
-        }
+            var hash = HashToken(resolution.Secret);
 
-        if (token.ExpiresAt <= DateTimeOffset.UtcNow)
-        {
-            return new AuthRefreshResult(AuthRefreshOutcome.Expired);
-        }
+            // Single round-trip: load token + user together.
+            var token = await effectiveDb.RefreshTokens
+                .Include(r => r.User)
+                .FirstOrDefaultAsync(r => r.TokenHash == hash, ct)
+                .ConfigureAwait(false);
 
-        if (!token.User.IsActive)
-        {
-            // Spec required: revoke immediately so the token cannot be reused if the
-            // account is later reactivated. Guarded by the same ConcurrencyCheck as
-            // the rotation path so we don't double-revoke under a race.
+            if (token is null)
+            {
+                return new AuthRefreshResult(AuthRefreshOutcome.NotFound);
+            }
+
+            if (token.RevokedAt is not null)
+            {
+                // Possible refresh-token theft / out-of-order client retry. Spec AC-2:
+                // log Warning + record metric + return same envelope as generic-invalid.
+                // No PII in the log — only the hash prefix and opaque UserId.
+                RefreshTokenReplayDetected(logger, hash[..8], token.UserId);
+                metrics.RecordReplayed();
+                return new AuthRefreshResult(AuthRefreshOutcome.Replayed);
+            }
+
+            if (token.ExpiresAt <= DateTimeOffset.UtcNow)
+            {
+                return new AuthRefreshResult(AuthRefreshOutcome.Expired);
+            }
+
+            if (!token.User.IsActive)
+            {
+                // Spec required: revoke immediately so the token cannot be reused if the
+                // account is later reactivated. Guarded by the same ConcurrencyCheck as
+                // the rotation path so we don't double-revoke under a race.
+                token.RevokedAt = DateTimeOffset.UtcNow;
+                try
+                {
+                    await effectiveDb.SaveChangesAsync(ct).ConfigureAwait(false);
+                    metrics.RecordRevoked();
+                }
+                catch (DbUpdateConcurrencyException)
+                {
+                    // Another caller just revoked this row — treat as Replayed (same
+                    // public envelope; differentiation lives only in this catch).
+                    RefreshTokenConcurrencyConflict(logger, token.UserId);
+                    metrics.RecordReplayed();
+                    return new AuthRefreshResult(AuthRefreshOutcome.Replayed);
+                }
+                return new AuthRefreshResult(AuthRefreshOutcome.AccountInactive);
+            }
+
+            // Rotation: revoke old, issue new — atomic, plus optimistic concurrency
+            // on RevokedAt so a parallel rotation of the same token loses cleanly.
             token.RevokedAt = DateTimeOffset.UtcNow;
+
+            var (newSecret, newHash) = GenerateRefreshToken();
+            var newToken = new RefreshToken
+            {
+                UserId = token.UserId,
+                TokenHash = newHash,
+                ExpiresAt = DateTimeOffset.UtcNow.AddDays(RefreshTokenTtlDays),
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
+            effectiveDb.RefreshTokens.Add(newToken);
+
             try
             {
-                await db.SaveChangesAsync(ct).ConfigureAwait(false);
-                metrics.RecordRevoked();
+                await effectiveDb.SaveChangesAsync(ct).ConfigureAwait(false);
             }
             catch (DbUpdateConcurrencyException)
             {
-                // Another caller just revoked this row — treat as Replayed (same
-                // public envelope; differentiation lives only in this catch).
+                // A concurrent rotation revoked this token first. The new row we tried
+                // to insert was rolled back by the same SaveChanges. Surface as Replayed
+                // so the client falls back to the login flow rather than retrying.
                 RefreshTokenConcurrencyConflict(logger, token.UserId);
                 metrics.RecordReplayed();
                 return new AuthRefreshResult(AuthRefreshOutcome.Replayed);
             }
-            return new AuthRefreshResult(AuthRefreshOutcome.AccountInactive);
+
+            metrics.RecordRevoked();
+            metrics.RecordIssued();
+
+            var roleNames = await effectiveDb.UserRoles
+                .Where(ur => ur.UserId == token.UserId)
+                .Select(ur => ur.Role.Name)
+                .ToArrayAsync(ct)
+                .ConfigureAwait(false);
+            var accessToken = jwtTokenService.CreateAccessToken(token.User, roleNames, resolution.TenantId);
+            var ttlSeconds = jwtOptions.Value.AccessTokenTtlMinutes * 60;
+
+            var response = new LoginResponse(
+                AccessToken: accessToken,
+                RefreshToken: BuildRefreshCookieValue(resolution.TenantId, newSecret),
+                ExpiresIn: ttlSeconds,
+                User: new AuthenticatedUser(
+                    UserId: token.User.Id,
+                    Email: token.User.Email,
+                    DisplayName: token.User.DisplayName,
+                    ThemePreference: token.User.ThemePreference,
+                    Roles: roleNames));
+
+            return new AuthRefreshResult(AuthRefreshOutcome.Success, response);
         }
-
-        // Rotation: revoke old, issue new — atomic, plus optimistic concurrency
-        // on RevokedAt so a parallel rotation of the same token loses cleanly.
-        token.RevokedAt = DateTimeOffset.UtcNow;
-
-        var (newRaw, newHash) = GenerateRefreshToken();
-        var newToken = new RefreshToken
+        finally
         {
-            UserId = token.UserId,
-            TokenHash = newHash,
-            ExpiresAt = DateTimeOffset.UtcNow.AddDays(RefreshTokenTtlDays),
-            CreatedAt = DateTimeOffset.UtcNow,
-        };
-        db.RefreshTokens.Add(newToken);
-
-        try
-        {
-            await db.SaveChangesAsync(ct).ConfigureAwait(false);
+            if (resolution.Scoped is not null)
+            {
+                await resolution.Scoped.DisposeAsync().ConfigureAwait(false);
+            }
         }
-        catch (DbUpdateConcurrencyException)
-        {
-            // A concurrent rotation revoked this token first. The new row we tried
-            // to insert was rolled back by the same SaveChanges. Surface as Replayed
-            // so the client falls back to the login flow rather than retrying.
-            RefreshTokenConcurrencyConflict(logger, token.UserId);
-            metrics.RecordReplayed();
-            return new AuthRefreshResult(AuthRefreshOutcome.Replayed);
-        }
-
-        metrics.RecordRevoked();
-        metrics.RecordIssued();
-
-        var roleNames = await db.UserRoles
-            .Where(ur => ur.UserId == token.UserId)
-            .Select(ur => ur.Role.Name)
-            .ToArrayAsync(ct)
-            .ConfigureAwait(false);
-        var accessToken = jwtTokenService.CreateAccessToken(token.User, roleNames);
-        var ttlSeconds = jwtOptions.Value.AccessTokenTtlMinutes * 60;
-
-        var response = new LoginResponse(
-            AccessToken: accessToken,
-            RefreshToken: newRaw,
-            ExpiresIn: ttlSeconds,
-            User: new AuthenticatedUser(
-                UserId: token.User.Id,
-                Email: token.User.Email,
-                DisplayName: token.User.DisplayName,
-                ThemePreference: token.User.ThemePreference,
-                Roles: roleNames));
-
-        return new AuthRefreshResult(AuthRefreshOutcome.Success, response);
     }
 
     public async Task<AuthLogoutResult> LogoutAsync(string? rawToken, CancellationToken ct)
@@ -475,37 +500,159 @@ internal sealed partial class AuthService(
             return new AuthLogoutResult(AuthLogoutOutcome.NoOp);
         }
 
-        var hash = HashToken(rawToken);
-
-        var token = await db.RefreshTokens
-            .FirstOrDefaultAsync(r => r.TokenHash == hash, ct)
-            .ConfigureAwait(false);
-
-        if (token is null)
+        var resolution = await ResolveRefreshCookieAsync(rawToken, ct).ConfigureAwait(false);
+        if (!resolution.IsValid)
         {
+            // Same safe-no-op posture as an ordinary unmatched token — logout never
+            // surfaces an error to the client (Story 12.6 I/O matrix).
             return new AuthLogoutResult(AuthLogoutOutcome.NoOp);
         }
 
-        if (token.RevokedAt is not null)
-        {
-            return new AuthLogoutResult(AuthLogoutOutcome.NoOp);
-        }
-
-        token.RevokedAt = DateTimeOffset.UtcNow;
-
+        var effectiveDb = resolution.Scoped?.Db ?? db;
         try
         {
-            await db.SaveChangesAsync(ct).ConfigureAwait(false);
+            var hash = HashToken(resolution.Secret);
+
+            var token = await effectiveDb.RefreshTokens
+                .FirstOrDefaultAsync(r => r.TokenHash == hash, ct)
+                .ConfigureAwait(false);
+
+            if (token is null)
+            {
+                return new AuthLogoutResult(AuthLogoutOutcome.NoOp);
+            }
+
+            if (token.RevokedAt is not null)
+            {
+                return new AuthLogoutResult(AuthLogoutOutcome.NoOp);
+            }
+
+            token.RevokedAt = DateTimeOffset.UtcNow;
+
+            try
+            {
+                await effectiveDb.SaveChangesAsync(ct).ConfigureAwait(false);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                RefreshTokenConcurrencyConflict(logger, token.UserId);
+                return new AuthLogoutResult(AuthLogoutOutcome.NoOp);
+            }
+
+            metrics.RecordRevoked();
+            return new AuthLogoutResult(AuthLogoutOutcome.Revoked);
         }
-        catch (DbUpdateConcurrencyException)
+        finally
         {
-            RefreshTokenConcurrencyConflict(logger, token.UserId);
-            return new AuthLogoutResult(AuthLogoutOutcome.NoOp);
+            if (resolution.Scoped is not null)
+            {
+                await resolution.Scoped.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    // Story 12.6 (Decision) — parses the "{tenantId}.{secret}" refresh-token cookie
+    // format and, for a non-empty tenantId prefix, resolves + validates that tenant
+    // (same exists/Active check TenantContextMiddleware performs, backed by the same
+    // ITenantLookupCache instance so the two stay consistent) and opens a schema-scoped
+    // FormForgeDbContext to query that tenant's own refresh_tokens table — mirroring
+    // LoginAgainstTenantSchemaAsync's connection-per-call pattern, since HasDefaultSchema
+    // can't vary per call. IsValid is false for: no "." at all (a legacy pre-migration
+    // cookie), an unparsable tenantId, an unknown tenant, a non-Active tenant, or a
+    // corrupted schema_name — every one of these must be indistinguishable from an
+    // ordinary unmatched token to the caller.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000",
+        Justification = "Ownership of tenantConnection/tenantDb transfers to the caller via " +
+            "RefreshCookieResolution.Scoped; RefreshAsync/LogoutAsync dispose both from their " +
+            "finally block via TenantScopedDbContext.DisposeAsync.")]
+    private async Task<RefreshCookieResolution> ResolveRefreshCookieAsync(string rawToken, CancellationToken ct)
+    {
+        var dotIndex = rawToken.IndexOf('.', StringComparison.Ordinal);
+        if (dotIndex < 0)
+        {
+            return RefreshCookieResolution.Invalid;
         }
 
-        metrics.RecordRevoked();
-        return new AuthLogoutResult(AuthLogoutOutcome.Revoked);
+        var tenantIdPrefix = rawToken[..dotIndex];
+        var secret = rawToken[(dotIndex + 1)..];
+
+        if (tenantIdPrefix.Length == 0)
+        {
+            return new RefreshCookieResolution(IsValid: true, TenantId: null, Secret: secret, Scoped: null);
+        }
+
+        if (!Guid.TryParse(tenantIdPrefix, out var tenantId))
+        {
+            return RefreshCookieResolution.Invalid;
+        }
+
+        var entry = lookupCache.TryGet(tenantId);
+        if (entry is null)
+        {
+            var tenant = await db.Tenants
+                .AsNoTracking()
+                .Where(t => t.Id == tenantId)
+                .Select(t => new { t.SchemaName, t.Status })
+                .FirstOrDefaultAsync(ct)
+                .ConfigureAwait(false);
+
+            if (tenant is null)
+            {
+                return RefreshCookieResolution.Invalid;
+            }
+
+            entry = new TenantLookupEntry(tenant.SchemaName, tenant.Status);
+            lookupCache.Set(tenantId, entry);
+        }
+
+        if (!string.Equals(entry.Status, "Active", StringComparison.Ordinal))
+        {
+            return RefreshCookieResolution.Invalid;
+        }
+
+        if (!SafeIdentifier.TryCreate(entry.SchemaName, out var safeSchemaName, out _))
+        {
+            return RefreshCookieResolution.Invalid;
+        }
+
+        var baseConnectionString = configuration.GetConnectionString("formforge")
+            ?? throw new InvalidOperationException("Connection string 'formforge' not configured.");
+        var csb = new NpgsqlConnectionStringBuilder(baseConnectionString) { SearchPath = safeSchemaName!.Value };
+        var tenantConnection = new NpgsqlConnection(csb.ConnectionString);
+        var options = new DbContextOptionsBuilder<FormForgeDbContext>().UseNpgsql(tenantConnection).Options;
+        var tenantDb = new FormForgeDbContext(options);
+
+        return new RefreshCookieResolution(
+            IsValid: true, TenantId: tenantId, Secret: secret,
+            Scoped: new TenantScopedDbContext(tenantConnection, tenantDb));
     }
+
+    // Bundles a tenant-scoped connection + FormForgeDbContext so RefreshAsync/
+    // LogoutAsync can dispose both, in the right order, from one finally block —
+    // mirrors LoginAgainstTenantSchemaAsync's nested try/finally without duplicating it.
+    private sealed class TenantScopedDbContext(NpgsqlConnection connection, FormForgeDbContext db) : IAsyncDisposable
+    {
+        public FormForgeDbContext Db { get; } = db;
+
+        public async ValueTask DisposeAsync()
+        {
+            await Db.DisposeAsync().ConfigureAwait(false);
+            await connection.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private sealed record RefreshCookieResolution(
+        bool IsValid, Guid? TenantId, string Secret, TenantScopedDbContext? Scoped)
+    {
+        internal static readonly RefreshCookieResolution Invalid = new(false, null, string.Empty, null);
+    }
+
+    // Story 12.6 (Decision) — composes the refresh-token cookie value. tenantId is
+    // null for the legacy/platform-tenant-less path, producing ".{secret}" (a leading
+    // dot, never a bare secret) so every current-format cookie is unambiguously
+    // splittable on the first '.'.
+    private static string BuildRefreshCookieValue(Guid? tenantId, string secret) =>
+        string.Create(CultureInfo.InvariantCulture, $"{tenantId}.{secret}");
 
     public async Task<PasswordResetInitiateResult> InitiatePasswordResetAsync(string email, CancellationToken ct)
     {
@@ -662,7 +809,13 @@ internal sealed partial class AuthService(
         // Revoke other active refresh tokens. If the caller supplied a refresh-token
         // cookie we can identify and preserve the current session; otherwise (no cookie,
         // API client, cookie cleared) we revoke all — same behaviour as ResetPasswordAsync.
-        var currentHash = currentRefreshTokenRaw != null ? HashToken(currentRefreshTokenRaw) : null;
+        // Story 12.6 — currentRefreshTokenRaw is now the composed "{tenantId}.{secret}"
+        // cookie value; RefreshTokens.TokenHash only ever hashes the secret half, so it
+        // must be extracted the same way ResolveRefreshCookieAsync does before hashing,
+        // or "preserve the current session" would never match any row and silently
+        // degrade to "revoke all" for every caller.
+        var currentSecret = ExtractRefreshTokenSecret(currentRefreshTokenRaw);
+        var currentHash = currentSecret != null ? HashToken(currentSecret) : null;
 
         if (currentHash != null)
         {
@@ -683,6 +836,23 @@ internal sealed partial class AuthService(
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
 
         return new ChangePasswordResult(ChangePasswordOutcome.Success);
+    }
+
+    // Story 12.6 — splits the composed "{tenantId}.{secret}" cookie value on its first
+    // '.' and returns the secret half (what TokenHash actually hashes). A value with no
+    // '.' at all (a legacy pre-migration cookie) is returned unchanged — see the call
+    // site in ChangePasswordAsync for why that degrades safely rather than needing to
+    // be rejected here. internal (not private) so AuthIntegrationTests can call it
+    // directly instead of reimplementing the same split.
+    internal static string? ExtractRefreshTokenSecret(string? rawCookieValue)
+    {
+        if (rawCookieValue is null)
+        {
+            return null;
+        }
+
+        var dotIndex = rawCookieValue.IndexOf('.', StringComparison.Ordinal);
+        return dotIndex < 0 ? rawCookieValue : rawCookieValue[(dotIndex + 1)..];
     }
 
     private static (string RawToken, string TokenHash) GenerateRefreshToken()

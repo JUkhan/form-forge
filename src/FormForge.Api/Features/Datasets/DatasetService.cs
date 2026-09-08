@@ -173,7 +173,7 @@ internal sealed partial class DatasetService(
 
         // Pre-build the DDL so the audit log can record it even when the VIEW DDL fails.
         // A "query"-type dataset has no backing VIEW, so there is no DDL.
-        var viewDdl = isQueryType ? null : DatasetViewManager.BuildCreateViewDdl(name, effectiveQuery);
+        var viewDdl = isQueryType ? null : viewManager.BuildCreateViewDdl(name, effectiveQuery);
 
         // Story 8.8 (AR-61) — checkpoint (a): enforce SELECT-only before any DDL. Runs
         // before the connection opens, so invalid input consumes no DB resources and
@@ -486,23 +486,23 @@ internal sealed partial class DatasetService(
             if (wasView && newIsView)
             {
                 primaryDdl = isRename
-                    ? DatasetViewManager.BuildRenameViewDdl(current.DatasetName, effectiveNewName)
-                    : DatasetViewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
+                    ? viewManager.BuildRenameViewDdl(current.DatasetName, effectiveNewName)
+                    : viewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
                 if (isRename && queryChanged)
                 {
                     primaryDdl = primaryDdl + "\n"
-                        + DatasetViewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
+                        + viewManager.BuildReplaceViewDdl(resolvedNewName!, effectiveViewQuery);
                 }
             }
             else if (wasView)
             {
                 // view → query: the VIEW still exists under the current (pre-rename) name.
-                primaryDdl = DatasetViewManager.BuildDropViewDdl(current.DatasetName);
+                primaryDdl = viewManager.BuildDropViewDdl(current.DatasetName);
             }
             else if (newIsView)
             {
                 // query → view: no prior VIEW; create one under the new name.
-                primaryDdl = DatasetViewManager.BuildCreateViewDdl(resolvedNewName!, effectiveViewQuery);
+                primaryDdl = viewManager.BuildCreateViewDdl(resolvedNewName!, effectiveViewQuery);
             }
             else
             {
@@ -749,7 +749,7 @@ internal sealed partial class DatasetService(
             // Step C — pre-build the DROP DDL so the audit log records it even on failure.
             // A "query"-type dataset has no backing VIEW, so there is nothing to drop.
             var hasView = current.QueryType == DatasetQueryTypes.View;
-            var dropDdl = hasView ? DatasetViewManager.BuildDropViewDdl(current.DatasetName) : null;
+            var dropDdl = hasView ? viewManager.BuildDropViewDdl(current.DatasetName) : null;
             var now = DateTimeOffset.UtcNow;
 
             // Step D — DELETE row + DROP VIEW inside one transaction (AR-59).

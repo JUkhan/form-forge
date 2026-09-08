@@ -473,8 +473,8 @@ public sealed class DatasetUpdateTests : IClassFixture<PostgresFixture>, IAsyncL
         Assert.True(entry.Succeeded);
         Assert.Equal("UPDATE", entry.Operation);
         // Story 8.10 fix: redefinition is now DROP + CREATE (not CREATE OR REPLACE).
-        Assert.Contains("DROP VIEW IF EXISTS datasets.\"audit_update_ds\"", entry.Ddl, StringComparison.Ordinal);
-        Assert.Contains("CREATE VIEW datasets.\"audit_update_ds\"", entry.Ddl, StringComparison.Ordinal);
+        Assert.Contains("DROP VIEW IF EXISTS \"datasets\".\"audit_update_ds\"", entry.Ddl, StringComparison.Ordinal);
+        Assert.Contains("CREATE VIEW \"datasets\".\"audit_update_ds\"", entry.Ddl, StringComparison.Ordinal);
         Assert.Equal(_adminUserId, entry.ActorId);
         Assert.Equal(knownCorrelationId, entry.CorrelationId);
         Assert.Equal("audit_update_ds", entry.DatasetName);
@@ -520,7 +520,7 @@ public sealed class DatasetUpdateTests : IClassFixture<PostgresFixture>, IAsyncL
         Assert.False(entry.Succeeded);
         Assert.Equal("UPDATE", entry.Operation);
         Assert.Contains(
-            "CREATE VIEW datasets.\"audit_fail_ds\"", entry.Ddl, StringComparison.Ordinal);
+            "CREATE VIEW \"datasets\".\"audit_fail_ds\"", entry.Ddl, StringComparison.Ordinal);
         Assert.Equal(_adminUserId, entry.ActorId);
     }
 

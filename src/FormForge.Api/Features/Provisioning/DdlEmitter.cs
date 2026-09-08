@@ -5,6 +5,7 @@ using Dapper;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Designer;
 using FormForge.Api.Features.SchemaRegistry;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -39,8 +40,16 @@ internal sealed partial class DdlEmitter(
     FormForgeDbContext db,
     DbConnectionFactory connectionFactory,
     ISchemaRegistry schemaRegistry,
+    ITenantContext tenantContext,
     ILogger<DdlEmitter> logger)
 {
+    // Story 12.6 — the requesting tenant's own schema (or `public` when no tenant is
+    // resolved, e.g. a background-processed provisioning job with no request scope).
+    // CREATE/ALTER TABLE statements below are unqualified identifiers that already
+    // resolve correctly via the connection's search_path (set by DbConnectionFactory);
+    // only the explicit information_schema `table_schema = ...` predicates need this.
+    private string Schema => tenantContext.SchemaName ?? "public";
+
     // Story 5.4 — system columns created by CreateTableAsync. Excluded from
     // orphaned-column tracking because they are not user-authored fieldKeys
     // and never appear in the target column set computed from RootElement.
@@ -244,20 +253,20 @@ internal sealed partial class DdlEmitter(
         }
     }
 
-    private static async Task<bool> TableExistsAsync(
+    private async Task<bool> TableExistsAsync(
         NpgsqlConnection connection, string tableName, CancellationToken ct)
     {
         _ = ct;
         const string sql = """
             SELECT COUNT(1) > 0
             FROM information_schema.tables
-            WHERE table_schema = 'public'
+            WHERE table_schema = @schema
               AND table_name = @tableName
             """;
         return await connection
             .ExecuteScalarAsync<bool>(
                 sql,
-                new { tableName },
+                new { schema = Schema, tableName },
                 commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false);
     }
@@ -323,7 +332,7 @@ internal sealed partial class DdlEmitter(
     // Story 5.5 — Core variant of AddMissingColumnsAsync. The caller owns the
     // NpgsqlTransaction. Reads information_schema.columns to compute the diff,
     // then ALTERs missing columns inside the supplied tx (no commit/rollback here).
-    private static async Task<AlterResult> AddMissingColumnsCoreAsync(
+    private async Task<AlterResult> AddMissingColumnsCoreAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction tx,
         SafeIdentifier tableName,
@@ -335,13 +344,13 @@ internal sealed partial class DdlEmitter(
         const string existingSql = """
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_schema = 'public'
+            WHERE table_schema = @schema
               AND table_name = @tableName
             """;
         var existing = (await connection
             .QueryAsync<string>(
                 existingSql,
-                new { tableName = tableName.Value },
+                new { schema = Schema, tableName = tableName.Value },
                 transaction: tx,
                 commandTimeout: DbConnectionFactory.DdlCommandTimeoutSeconds)
             .ConfigureAwait(false))

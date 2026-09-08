@@ -3,6 +3,7 @@ using System.Text.Json;
 using Dapper;
 using FormForge.Api.Domain.ValueTypes;
 using FormForge.Api.Features.Datasets.Dtos;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Npgsql;
 using NpgsqlTypes;
@@ -151,12 +152,16 @@ internal interface IDatasetRowQueryService
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812",
     Justification = "Registered via DI.")]
-internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFactory)
+internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFactory, ITenantContext tenantContext)
     : IDatasetRowQueryService
 {
     private const int CommandTimeoutSeconds = 5;
     private const int ExportCommandTimeoutSeconds = 30;
     private const int MaxExportRows = 100_000;
+
+    // Story 12.6 — the tenant's own `{schema}_datasets` namespace, or the legacy
+    // global `datasets` schema when no tenant is resolved.
+    private string DatasetsSchema => TenantDatasetSchemaResolver.Resolve(tenantContext);
 
     public async Task<DatasetRowsResult> GetRowsAsync(
         Guid datasetId, DatasetRowsRequest request, CancellationToken ct, Guid? authUserId = null)
@@ -170,7 +175,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         {
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, request.QueryParameters, allowParameterized: true,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetRowsResult(DatasetRowsOutcome.NotFound);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
@@ -227,7 +232,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         {
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, request.QueryParameters, allowParameterized: true,
-                ExportCommandTimeoutSeconds, ct).ConfigureAwait(false);
+                ExportCommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetExportResult(DatasetExportOutcome.NotFound);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
@@ -323,7 +328,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         {
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, request.QueryParameters, allowParameterized: true,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetChartResult(DatasetChartOutcome.NotFound);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
@@ -402,7 +407,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         {
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, request.QueryParameters, allowParameterized: true,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetTreeLevelResult(DatasetRowsOutcome.NotFound);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
@@ -483,7 +488,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
             // parameterized query is unsupported); placeholder-free query + view types work.
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, queryParametersJson: null, allowParameterized: true,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetTreeDescendantsResult(DatasetRowsOutcome.NotFound);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
@@ -568,7 +573,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
             // reveal (no runtime placeholders), placeholder-free query + view types work.
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, queryParametersJson: null, allowParameterized: true,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetTreeAncestorsResult(DatasetRowsOutcome.NotFound);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)
@@ -645,7 +650,7 @@ internal sealed class DatasetRowQueryService(DbConnectionFactory connectionFacto
         {
             var resolved = await DatasetSourceResolver.ResolveAsync(
                 conn, datasetId, request.QueryParameters, allowParameterized: true,
-                CommandTimeoutSeconds, ct).ConfigureAwait(false);
+                CommandTimeoutSeconds, DatasetsSchema, requireParameterValues: true, ct).ConfigureAwait(false);
             if (resolved.Outcome == DatasetSourceOutcome.NotFound)
                 return new DatasetTreeSearchResult(DatasetRowsOutcome.NotFound);
             if (resolved.Outcome != DatasetSourceOutcome.Ok)

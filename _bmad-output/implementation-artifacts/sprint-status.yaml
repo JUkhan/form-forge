@@ -1,5 +1,5 @@
 # generated: 2026-05-22
-# last_updated: 2026-09-08 (story 12-5 tenants-admin-page implemented, reviewed, and patched — review)
+# last_updated: 2026-09-08 (story 12-6 tenant-context-middleware-integration implemented — review)
 # project: tinnitus
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-22'
-last_updated: 09-08-2026 17:05
+last_updated: 09-08-2026 20:00
 project: FormForge (tinnitus)
 project_key: NOKEY
 tracking_system: file-system
@@ -173,6 +173,6 @@ development_status:
   12-3-tenant-context-resolution: review
   12-4-platform-super-admin-bootstrap: review
   12-5-tenants-admin-page: review
-  12-6-tenant-context-middleware-integration: backlog
+  12-6-tenant-context-middleware-integration: review
   12-7-tenant-onboarding-activation: review
   epic-12-retrospective: optional

@@ -443,7 +443,10 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
             // endpoint's own catch block sets this when ProvisionSchemaAsync or
             // OnboardTenantAsync throws mid-flow (Decision, additive to
             // TenantProvisioningRecoveryService's unrelated flag-only scan).
-            e.ToTable("tenants", t => t.HasCheckConstraint(
+            // Story 12.6 — pinned to schema "public" explicitly (rather than relying on
+            // search_path) so this table resolves correctly regardless of which tenant
+            // schema the connection's search_path currently favors.
+            e.ToTable("tenants", schema: "public", t => t.HasCheckConstraint(
                 "ck_tenants_status",
                 "status IN ('Provisioning', 'Active', 'Suspended', 'Error')"));
             e.HasKey(tn => tn.Id);
@@ -468,7 +471,9 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
         // MFA/roles columns — see PlatformAdmin.cs for why.
         modelBuilder.Entity<PlatformAdmin>(e =>
         {
-            e.ToTable("platform_admins");
+            // Story 12.6 — pinned to schema "public" explicitly; see the Tenant mapping
+            // above for why.
+            e.ToTable("platform_admins", schema: "public");
             e.HasKey(p => p.Id);
             e.Property(p => p.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
             e.Property(p => p.UserEmail).HasColumnName("user_email").IsRequired().HasMaxLength(320);
@@ -484,7 +489,9 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
         // no scenario yet where a tenant outlives its index rows).
         modelBuilder.Entity<TenantUserIndexEntry>(e =>
         {
-            e.ToTable("tenant_user_index");
+            // Story 12.6 — pinned to schema "public" explicitly; see the Tenant mapping
+            // above for why.
+            e.ToTable("tenant_user_index", schema: "public");
             e.HasKey(t => t.Email);
             e.Property(t => t.Email).HasColumnName("email").IsRequired().HasMaxLength(320);
             e.Property(t => t.TenantId).HasColumnName("tenant_id").IsRequired();

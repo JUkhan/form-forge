@@ -306,7 +306,7 @@ public sealed class DatasetBuilderLifecycleTests : IClassFixture<PostgresFixture
         Assert.NotNull(entry.Ddl);
         Assert.StartsWith("-- Builder-generated\n", entry.Ddl!, StringComparison.Ordinal);
         Assert.Contains("ALTER VIEW", entry.Ddl!, StringComparison.Ordinal);
-        Assert.Contains("CREATE VIEW datasets.\"blc_renqc_done\"", entry.Ddl!, StringComparison.Ordinal);
+        Assert.Contains("CREATE VIEW \"datasets\".\"blc_renqc_done\"", entry.Ddl!, StringComparison.Ordinal);
     }
 
     // ---------- helpers ----------

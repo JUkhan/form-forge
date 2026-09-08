@@ -153,7 +153,7 @@ public sealed class DatasetDeleteTests : IClassFixture<PostgresFixture>, IAsyncL
         Assert.True(entry.Succeeded);
         Assert.Equal("DELETE", entry.Operation);
         Assert.Contains(
-            "DROP VIEW IF EXISTS datasets.\"audit_delete_ds\"", entry.Ddl, StringComparison.Ordinal);
+            "DROP VIEW IF EXISTS \"datasets\".\"audit_delete_ds\"", entry.Ddl, StringComparison.Ordinal);
         Assert.Equal(_adminUserId, entry.ActorId);
         Assert.Equal("audit_delete_ds", entry.DatasetName);
         Assert.True(entry.Timestamp > DateTimeOffset.UtcNow.AddMinutes(-1));

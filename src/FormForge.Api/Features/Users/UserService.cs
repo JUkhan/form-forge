@@ -2,6 +2,7 @@ using System.Data;
 using FormForge.Api.Common;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Auth;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Features.Users.Dtos;
 using FormForge.Api.Infrastructure.EventBus;
 using FormForge.Api.Infrastructure.Persistence;
@@ -57,11 +58,21 @@ internal interface IUserService
 internal sealed class UserService(
     FormForgeDbContext db,
     IDomainEventBus bus,
-    IPasswordHasher passwordHasher) : IUserService
+    IPasswordHasher passwordHasher,
+    ITenantContext tenantContext) : IUserService
 {
     // Well-known platform-admin role ID seeded by the Story 2.4 migration
     // (20260523021147_CreateRolesRolePermissionsAndUserRoles).
     private static readonly Guid PlatformAdminRoleId = new("00000000-0000-0000-0000-000000000001");
+
+    // The two unique constraints a create-user insert can violate once the
+    // public.tenant_user_index row is written in the same SaveChanges as the tenant-schema
+    // `users` row: the tenant's own uq_users_email, and the globally-unique index PK.
+    // Both mean "this email is taken" and both map to the same generic 409 — the response
+    // must never reveal that the collision came from another tenant.
+    private static bool IsEmailUniqueViolation(PostgresException pg) =>
+        string.Equals(pg.ConstraintName, "uq_users_email", StringComparison.Ordinal)
+        || string.Equals(pg.ConstraintName, "PK_tenant_user_index", StringComparison.Ordinal);
 
     public async Task<AssignRolesResult> AssignRolesAsync(
         Guid userId,
@@ -315,6 +326,63 @@ internal sealed class UserService(
             return new CreateUserResult(CreateUserOutcome.DuplicateEmail);
         }
 
+        // architecture.md Decision 7.3 — public.tenant_user_index must be written by the
+        // provisioning service AND every user-creation call. Without this, a user created
+        // here has a row in the tenant's `users` table but nothing routing their email to
+        // the tenant, so LoginAsync falls through to the legacy public.users check and 401s.
+        // TenantId is null for a legacy/tenant-less token: skip the index entirely and leave
+        // the pre-tenancy behavior exactly as it was.
+        var tenantId = tenantContext.TenantId;
+
+        if (tenantId is not null)
+        {
+            // `email` is globally unique in the index (PK), so a row owned by ANOTHER tenant
+            // blocks this insert too. Reuse the generic DuplicateEmail outcome rather than
+            // leaking that the address is registered somewhere else on the platform.
+            var emailIndexed = await db.TenantUserIndex
+                .AsNoTracking()
+                .AnyAsync(t => t.Email == email, ct)
+                .ConfigureAwait(false);
+
+            if (emailIndexed)
+            {
+                return new CreateUserResult(CreateUserOutcome.DuplicateEmail);
+            }
+
+            // Mirrors TenantOnboardingService's platform-admin collision guard: LoginAsync
+            // checks public.platform_admins first and treats a match as terminal, so a user
+            // created on a colliding email could never log in to this tenant. Same generic
+            // 409 — the admin gets "email taken", not the platform's admin roster.
+            var platformAdminCollision = await db.PlatformAdmins
+                .AsNoTracking()
+                .AnyAsync(p => p.UserEmail == email, ct)
+                .ConfigureAwait(false);
+
+            if (platformAdminCollision)
+            {
+                return new CreateUserResult(CreateUserOutcome.DuplicateEmail);
+            }
+
+            // The `exists` pre-check above ran through EF, so under a tenant request the
+            // interceptor's search_path sent it to the TENANT's `users` table — it cannot see
+            // a legacy row in public.users. That matters because LoginAsync reads
+            // tenant_user_index (AuthService.cs:178) BEFORE public.users (:189): writing an
+            // index row for an email a legacy account already owns would shadow that account
+            // and lock its owner out of their own login. Raw parameterized SQL because an EF
+            // `db.Users` query cannot express "the public one" under the tenant search_path.
+            var legacyEmailTaken = await db.Database
+                .SqlQueryRaw<bool>(
+                    "SELECT EXISTS(SELECT 1 FROM public.users WHERE email = {0}) AS \"Value\"",
+                    email)
+                .SingleAsync(ct)
+                .ConfigureAwait(false);
+
+            if (legacyEmailTaken)
+            {
+                return new CreateUserResult(CreateUserOutcome.DuplicateEmail);
+            }
+        }
+
         var user = new User
         {
             Email = email,
@@ -325,8 +393,23 @@ internal sealed class UserService(
         };
         db.Users.Add(user);
 
+        if (tenantId is not null)
+        {
+            // Same normalized email as the user row, same SaveChangesAsync: EF wraps the
+            // multi-statement batch in one transaction, so the tenant-schema `users` row and
+            // the public.tenant_user_index row commit or roll back together. The index entity
+            // is pinned to schema "public" in the model, so this is correct under the tenant
+            // search_path without any explicit qualification here.
+            db.TenantUserIndex.Add(new TenantUserIndexEntry
+            {
+                Email = email,
+                TenantId = tenantId.Value,
+            });
+        }
+
         // Wrap SaveChanges to translate the race-window unique-violation on
-        // uq_users_email back into the documented 409 outcome — two concurrent
+        // uq_users_email (or, for a tenant request, the globally-unique
+        // PK_tenant_user_index) back into the documented 409 outcome — two concurrent
         // POSTs with the same email both pass the AnyAsync pre-check and the
         // second insert would otherwise surface as a 500. (Mirrors CreateRoleAsync.)
         try
@@ -335,13 +418,12 @@ internal sealed class UserService(
         }
         catch (DbUpdateException ex) when (
             ex.InnerException is PostgresException { SqlState: "23505" } pg
-            && string.Equals(pg.ConstraintName, "uq_users_email", StringComparison.Ordinal))
+            && IsEmailUniqueViolation(pg))
         {
             return new CreateUserResult(CreateUserOutcome.DuplicateEmail);
         }
         catch (PostgresException pg) when (
-            pg.SqlState is "23505"
-            && string.Equals(pg.ConstraintName, "uq_users_email", StringComparison.Ordinal))
+            pg.SqlState is "23505" && IsEmailUniqueViolation(pg))
         {
             // Npgsql sometimes surfaces commit-time constraint failures bare
             // rather than wrapping them in DbUpdateException — mirror the

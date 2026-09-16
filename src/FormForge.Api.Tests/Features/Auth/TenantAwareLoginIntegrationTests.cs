@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Tenancy;
@@ -27,6 +28,10 @@ namespace FormForge.Api.Tests.Features.Auth;
     Justification = "WebApplicationFactory is disposed via DisposeAsync in IAsyncLifetime.")]
 public sealed class TenantAwareLoginIntegrationTests : IClassFixture<PostgresFixture>, IAsyncLifetime
 {
+    // Seeded into every tenant schema by the static migration set replay (Story 12.2) as
+    // name "platform-admin" — the role claim /api/admin's policy checks for.
+    private static readonly Guid TenantAdminRoleId = new("00000000-0000-0000-0000-000000000001");
+
     private readonly PostgresFixture _postgres;
     private WebApplicationFactory<Program>? _factory;
     private HttpClient? _client;
@@ -93,21 +98,41 @@ public sealed class TenantAwareLoginIntegrationTests : IClassFixture<PostgresFix
     // Seeds a user directly into the tenant's own schema (SearchPath-scoped
     // FormForgeDbContext, same pattern as TenantOnboardingService) plus the
     // tenant_user_index routing row in public — the two things LoginAsync depends on.
-    private async Task SeedTenantUserAsync(string schemaName, Guid tenantId, string email, string password)
+    //
+    // asTenantAdmin additionally grants the seeded user the tenant-admin role that the
+    // static migration set seeds into every tenant schema (id 0001, name "platform-admin"),
+    // so the JWT issued for it carries the role claim /api/admin's policy requires — needed
+    // only by the test that drives POST /api/admin/users as this tenant.
+    private async Task SeedTenantUserAsync(
+        string schemaName, Guid tenantId, string email, string password, bool asTenantAdmin = false)
     {
         var csb = new NpgsqlConnectionStringBuilder(_postgres.ConnectionString) { SearchPath = schemaName };
         await using var tenantConnection = new NpgsqlConnection(csb.ConnectionString);
         var options = new DbContextOptionsBuilder<FormForgeDbContext>().UseNpgsql(tenantConnection).Options;
         await using (var tenantDb = new FormForgeDbContext(options))
         {
-            tenantDb.Users.Add(new User
+            var user = new User
             {
                 Email = email,
                 DisplayName = "Tenant Admin",
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(password, 12),
                 IsActive = true,
                 CreatedAt = DateTimeOffset.UtcNow,
-            });
+            };
+            tenantDb.Users.Add(user);
+
+            if (asTenantAdmin)
+            {
+                // Navigation, not UserId: User.Id is store-generated, so only EF's fixup
+                // resolves the FK inside one SaveChanges (same as TenantOnboardingService).
+                tenantDb.UserRoles.Add(new UserRole
+                {
+                    User = user,
+                    RoleId = TenantAdminRoleId,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                });
+            }
+
             await tenantDb.SaveChangesAsync();
         }
 
@@ -322,6 +347,52 @@ public sealed class TenantAwareLoginIntegrationTests : IClassFixture<PostgresFix
         await using var tenantDb = new FormForgeDbContext(options);
         var token = await tenantDb.RefreshTokens.AsNoTracking().SingleAsync();
         Assert.NotNull(token.RevokedAt);
+    }
+
+    // The end-to-end acceptance criterion for the tenant_user_index-on-create fix: a tenant
+    // admin creates a user through the real Users tab endpoint, and that user can log in
+    // immediately and receive a JWT carrying the SAME tenantId. Before the fix, no index row
+    // was written, so this login fell through to the legacy public.users check and 401'd.
+    [Fact]
+    public async Task UserCreatedThroughAdminApi_CanLogInImmediately_AndJwtCarriesSameTenantId()
+    {
+        var tenant = await ProvisionTenantAsync("tenant_login_created_user");
+        await SeedTenantUserAsync(
+            tenant.SchemaName, tenant.Id, "admin@tenant-created.example", "Password1!", asTenantAdmin: true);
+
+        using var loginResponse = await _client!.PostAsJsonAsync("/api/auth/login",
+            new { email = "admin@tenant-created.example", password = "Password1!" });
+        loginResponse.EnsureSuccessStatusCode();
+        var adminLogin = await loginResponse.Content.ReadFromJsonAsync<LoginResponseDto>();
+        Assert.NotNull(adminLogin);
+
+        using (var createRequest = new HttpRequestMessage(HttpMethod.Post, "/api/admin/users")
+        {
+            Content = JsonContent.Create(new
+            {
+                email = "created@tenant-created.example",
+                displayName = "Created Through API",
+                temporaryPassword = "TempPass123!",
+            }),
+        })
+        {
+            createRequest.Headers.Authorization =
+                new AuthenticationHeaderValue("Bearer", adminLogin!.AccessToken);
+            using var createResponse = await _client!.SendAsync(createRequest);
+            Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        }
+
+        using var newUserLogin = await _client!.PostAsJsonAsync("/api/auth/login",
+            new { email = "created@tenant-created.example", password = "TempPass123!" });
+
+        Assert.Equal(HttpStatusCode.OK, newUserLogin.StatusCode);
+        var body = await newUserLogin.Content.ReadFromJsonAsync<LoginResponseDto>();
+        Assert.NotNull(body);
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(body!.AccessToken);
+        var tenantIdClaim = jwt.Claims.FirstOrDefault(c => c.Type == "tenantId");
+        Assert.NotNull(tenantIdClaim);
+        Assert.Equal(tenant.Id.ToString(), tenantIdClaim!.Value);
     }
 
     [SuppressMessage("Performance", "CA1812",

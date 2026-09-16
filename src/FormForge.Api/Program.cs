@@ -190,6 +190,12 @@ builder.Services.AddScoped<IValidator<MfaVerifyLoginRequest>, MfaVerifyLoginRequ
 
 // Permission infrastructure (Story 2.6) — Singletons. PermissionService subscribes
 // to domain events in its constructor, so it must outlive any single request.
+//
+// Story 12.6 follow-up — that Singleton lifetime is exactly why PermissionService needs
+// IHttpContextAccessor: it cannot inject the request-scoped ITenantContext directly, but
+// its permission compute MUST run against the caller's tenant schema. The accessor lets
+// it reach the request's own scope and replay that tenant onto the child scope it creates.
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<IDomainEventBus, InProcessEventBus>();
 builder.Services.AddSingleton<IPermissionService, PermissionService>();
 
@@ -203,13 +209,19 @@ builder.Services.AddSingleton<IPermissionService, PermissionService>();
 var provisioningChannel = System.Threading.Channels.Channel.CreateBounded<ProvisioningJob>(256);
 builder.Services.AddSingleton(provisioningChannel.Reader);
 builder.Services.AddSingleton(provisioningChannel.Writer);
-builder.Services.AddSingleton<IProvisioningService, ProvisioningService>();
+// Story 12.6 follow-up — Scoped (was Singleton): ProvisioningService now reads the
+// enqueueing request's ITenantContext to stamp TenantId/TenantSchema onto each job, so the
+// Singleton consumer can replay that tenant onto the scope it creates. Its ChannelWriter
+// dependency stays a Singleton, so the queue is unaffected; both injectors
+// (MenuService, TableProvisioningService) are already Scoped.
+builder.Services.AddScoped<IProvisioningService, ProvisioningService>();
 builder.Services.AddScoped<BindingDiffService>();
 builder.Services.AddHostedService<ProvisioningBackgroundService>();
 // Story 5.8 — startup recovery: re-enqueues any menus left Pending by a prior
 // process crash or the Dapper-EF dual-write hazard. Registered after the consumer
 // so the BackgroundService is already listening on the channel when recovery
 // writes (the channel buffers regardless, but this order reads cleaner).
+// Story 12.6 follow-up — the scan now sweeps `public` plus every Active tenant's schema.
 builder.Services.AddHostedService<ProvisioningRecoveryService>();
 
 // Story 5.3 — Dapper-backed dynamic-schema DDL. DbConnectionFactory wraps raw

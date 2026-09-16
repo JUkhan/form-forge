@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -28,6 +29,19 @@ internal sealed partial class ProvisioningBackgroundService(
     private async Task ProcessJobAsync(ProvisioningJob job, CancellationToken ct)
     {
         using var scope = scopeFactory.CreateScope();
+
+        // Story 12.6 follow-up (Decision 7.7) — this scope is created by a Singleton long
+        // after the enqueueing request's scope was disposed, so its ITenantContext starts
+        // unset and every connection would default to `public`. Replay the tenant the job
+        // carries BEFORE resolving anything scoped: FormForgeDbContext (via
+        // TenantSchemaConnectionInterceptor), DbConnectionFactory, and DdlEmitter all read
+        // ITenantContext, so this one call is what makes the whole DDL pipeline target the
+        // right schema. Without it, a tenant's CREATE/ALTER TABLE landed in `public`.
+        if (job is { TenantId: { } tenantId, TenantSchema: { } tenantSchema })
+        {
+            scope.ServiceProvider.GetRequiredService<ITenantContext>().Set(tenantId, tenantSchema);
+        }
+
         var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
 
         // Menu-less job (admin Table Provisioning tab): no menu row to load or update.

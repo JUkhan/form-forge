@@ -16,9 +16,20 @@ namespace FormForge.Api.Features.Provisioning;
 // from a Designer with no menu binding. ProvisioningBackgroundService skips the
 // menu status write for these and relies on table-existence + the schema audit
 // log to surface status (DdlEmitter never reads MenuId, so the emit is identical).
+// Story 12.6 follow-up (architecture.md Decision 7.7) — TenantId/TenantSchema carry the
+// enqueueing request's tenant across the Channel. They have to live ON THE JOB rather than
+// be resolved by the consumer: ProvisioningBackgroundService is a Singleton draining a
+// queue long after the originating request's DI scope was disposed, so there is no ambient
+// ITenantContext for it to read. ProvisioningService stamps them at enqueue time; the
+// consumer replays them onto the scope it creates per job.
+//
+// Both null means "no tenant" — a legacy single-tenant deployment, or a job recovered from
+// the `public` schema — which keeps the connection on `public`, exactly as before.
 internal sealed record ProvisioningJob(
     Guid? MenuId,
     string DesignerId,
     int Version,
     Guid? ActorId,
-    int? FromVersion = null);
+    int? FromVersion = null,
+    Guid? TenantId = null,
+    string? TenantSchema = null);

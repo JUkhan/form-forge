@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.EventBus;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -15,6 +16,7 @@ internal sealed class PermissionService : IPermissionService
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IMemoryCache _cache;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
     // Secondary index: roleId → set of userIds whose permissions are currently cached
     // with that role. Populated on cache write; used to find affected cache keys when
@@ -28,17 +30,28 @@ internal sealed class PermissionService : IPermissionService
     // its (potentially stale) result. (Story 2.6 review patch #2.)
     private readonly ConcurrentDictionary<Guid, long> _userVersions = new();
 
+    // Story 12.6 follow-up — userId → the tenant-dimensioned cache key currently written
+    // for that user. The domain events below carry only a UserId/RoleId (they predate
+    // tenancy), so an invalidation handler cannot rebuild the key on its own once it
+    // includes a tenant segment. A user belongs to exactly one tenant, so a single-valued
+    // map is sufficient. Worst case (the same userId resolved once with and once without a
+    // tenant) leaks one entry until its 30 s TTL expires.
+    private readonly ConcurrentDictionary<Guid, string> _userCacheKeys = new();
+
     public PermissionService(
         IServiceScopeFactory scopeFactory,
         IMemoryCache cache,
-        IDomainEventBus bus)
+        IDomainEventBus bus,
+        IHttpContextAccessor httpContextAccessor)
     {
         ArgumentNullException.ThrowIfNull(scopeFactory);
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(bus);
+        ArgumentNullException.ThrowIfNull(httpContextAccessor);
 
         _scopeFactory = scopeFactory;
         _cache = cache;
+        _httpContextAccessor = httpContextAccessor;
 
         bus.Subscribe<UserRoleAssignmentChanged>(OnUserRoleAssignmentChanged);
         bus.Subscribe<RolePermissionsChanged>(OnRolePermissionsChanged);
@@ -48,12 +61,23 @@ internal sealed class PermissionService : IPermissionService
 
     // Namespaced cache key so PermissionService cannot collide with any other
     // Singleton service caching by Guid in the shared IMemoryCache. (Patch #9.)
-    private static string CacheKey(Guid userId) =>
-        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"permissions:{userId:N}");
+    //
+    // Story 12.6 follow-up (architecture.md Decision 7.6) — the key gains a tenant
+    // segment. Without it, a snapshot computed for one schema could be served to a
+    // request resolved against another: most concretely, an all-denied snapshot
+    // computed against `public` (where a tenant user has no rows at all) would be
+    // served to that tenant user for the full 30 s TTL.
+    private static string CacheKey(Guid? tenantId, Guid userId) =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"permissions:{(tenantId is { } t ? t.ToString("N") : "public")}:{userId:N}");
 
     public async Task<EffectivePermissions> GetEffectivePermissionsAsync(Guid userId, CancellationToken ct)
     {
-        var key = CacheKey(userId);
+        // Resolve the CALLING request's tenant before anything else — it selects both
+        // the cache key and the schema the compute below runs against.
+        var tenant = ResolveRequestTenant();
+        var key = CacheKey(tenant?.TenantId, userId);
 
         if (_cache.TryGetValue<EffectivePermissions>(key, out var cached) && cached is not null)
         {
@@ -65,7 +89,7 @@ internal sealed class PermissionService : IPermissionService
         // re-check below, we evict the (potentially stale) entry we just wrote.
         var versionAtStart = _userVersions.GetOrAdd(userId, 0L);
 
-        var permissions = await ComputePermissionsAsync(userId, ct).ConfigureAwait(false);
+        var permissions = await ComputePermissionsAsync(userId, tenant, ct).ConfigureAwait(false);
 
         // Register in _roleUserMap BEFORE the cache write so that any
         // RolePermissionsChanged firing after this point sees this user, bumps
@@ -76,13 +100,17 @@ internal sealed class PermissionService : IPermissionService
                         .TryAdd(userId, 0);
         }
 
+        // Same ordering rationale: an invalidation handler firing after this point must
+        // be able to find the key we are about to write.
+        _userCacheKeys[userId] = key;
+
         using (var entry = _cache.CreateEntry(key))
         {
             entry.Value = permissions;
             entry.AbsoluteExpirationRelativeToNow = CacheTtl;
             // Natural eviction (TTL, memory pressure, Replaced) must clean up the
             // secondary index so it doesn't grow without bound. (Patch #4.)
-            entry.RegisterPostEvictionCallback(OnEntryEvicted, userId);
+            entry.RegisterPostEvictionCallback(OnEntryEvicted, new EvictionState(userId, key));
         }
 
         // If a bust raced our compute, discard. Idempotent with the bust handler's
@@ -119,10 +147,46 @@ internal sealed class PermissionService : IPermissionService
         return permissions.PerResource.TryGetValue(normalizedId, out var flags) ? flags : default;
     }
 
-    private async Task<EffectivePermissions> ComputePermissionsAsync(Guid userId, CancellationToken ct)
+    // Story 12.6 follow-up — the request's resolved tenant, captured so it can be
+    // replayed onto the child scope created below. Null means "no tenant" (anonymous,
+    // platform-super-admin, a legacy claim-less token, or a non-HTTP caller such as a
+    // test), which keeps the connection on `public` exactly as before.
+    private sealed record TenantScope(Guid TenantId, string SchemaName);
+
+    private sealed record EvictionState(Guid UserId, string Key);
+
+    private TenantScope? ResolveRequestTenant()
+    {
+        // RequestServices (not the root provider) — this is the scope
+        // TenantContextMiddleware already called ITenantContext.Set() on.
+        var tenantContext = _httpContextAccessor.HttpContext?.RequestServices
+            .GetService<ITenantContext>();
+
+        return tenantContext is { TenantId: { } tenantId, SchemaName: { } schemaName }
+            ? new TenantScope(tenantId, schemaName)
+            : null;
+    }
+
+    private async Task<EffectivePermissions> ComputePermissionsAsync(
+        Guid userId, TenantScope? tenant, CancellationToken ct)
     {
         // Singleton service → Scoped DbContext via IServiceScopeFactory (AR-36 pattern).
         using var scope = _scopeFactory.CreateScope();
+
+        // Story 12.6 follow-up — the child scope gets its OWN ITenantContext, which
+        // TenantContextMiddleware never touched (it only ran against the request's scope).
+        // Left unset, TenantSchemaConnectionInterceptor would resolve search_path to
+        // `public`, where a tenant user has no `users`/`user_roles` rows at all — so every
+        // tenant user's permissions computed as all-denied (IsActive=false, no roleIds),
+        // which hid every permission-gated control in the UI and 403'd every
+        // RequirePermission-gated route. Replay the request's tenant onto this scope
+        // BEFORE resolving the DbContext so the interceptor sees it at connection-open.
+        if (tenant is not null)
+        {
+            scope.ServiceProvider.GetRequiredService<ITenantContext>()
+                 .Set(tenant.TenantId, tenant.SchemaName);
+        }
+
         var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
 
         // Story 2.8: IsActive must reflect users.is_active, not a hard-coded true.
@@ -198,21 +262,42 @@ internal sealed class PermissionService : IPermissionService
 
     private void OnEntryEvicted(object key, object? value, EvictionReason reason, object? state)
     {
-        if (state is not Guid evictedUserId)
+        if (state is not EvictionState evicted)
         {
             return;
         }
 
         foreach (var bucket in _roleUserMap.Values)
         {
-            bucket.TryRemove(evictedUserId, out _);
+            bucket.TryRemove(evicted.UserId, out _);
+        }
+
+        // Replaced fires when a fresh compute overwrites this very key — the map already
+        // points at the new (identical) key, so dropping it here would strand the entry
+        // with no way for an invalidation handler to find it. The KeyValuePair overload
+        // also guards the rarer case where the map has since moved to a different key.
+        if (reason != EvictionReason.Replaced)
+        {
+            ((ICollection<KeyValuePair<Guid, string>>)_userCacheKeys)
+                .Remove(new KeyValuePair<Guid, string>(evicted.UserId, evicted.Key));
+        }
+    }
+
+    // The domain events carry only a UserId, so the tenant-dimensioned key has to come
+    // from _userCacheKeys. A user with nothing cached simply has no entry to remove —
+    // the in-flight compute's own post-write version check covers that race.
+    private void RemoveUserEntry(Guid userId)
+    {
+        if (_userCacheKeys.TryGetValue(userId, out var key))
+        {
+            _cache.Remove(key);
         }
     }
 
     private void OnUserRoleAssignmentChanged(UserRoleAssignmentChanged e)
     {
         _userVersions.AddOrUpdate(e.UserId, 1L, static (_, v) => v + 1);
-        _cache.Remove(CacheKey(e.UserId));
+        RemoveUserEntry(e.UserId);
         // OnEntryEvicted handles _roleUserMap cleanup when the entry existed; if
         // it didn't, an in-flight compute will see the bumped version and discard.
     }
@@ -227,14 +312,14 @@ internal sealed class PermissionService : IPermissionService
         foreach (var userId in users.Keys)
         {
             _userVersions.AddOrUpdate(userId, 1L, static (_, v) => v + 1);
-            _cache.Remove(CacheKey(userId));
+            RemoveUserEntry(userId);
         }
     }
 
     private void OnUserDeactivated(UserDeactivated e)
     {
         _userVersions.AddOrUpdate(e.UserId, 1L, static (_, v) => v + 1);
-        _cache.Remove(CacheKey(e.UserId));
+        RemoveUserEntry(e.UserId);
     }
 
     // Reactivation must bust the cache too — without this, a reactivated user
@@ -244,6 +329,6 @@ internal sealed class PermissionService : IPermissionService
     private void OnUserReactivated(UserReactivated e)
     {
         _userVersions.AddOrUpdate(e.UserId, 1L, static (_, v) => v + 1);
-        _cache.Remove(CacheKey(e.UserId));
+        RemoveUserEntry(e.UserId);
     }
 }

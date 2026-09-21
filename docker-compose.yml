@@ -1,12 +1,15 @@
 services:
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - minio-data:/data
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     networks:
       - default
       - dokploy-network
@@ -22,7 +25,7 @@ services:
     # Add a Dokploy domain: Host=${MINIO_DOMAIN}, Service=minio, Port=9000, HTTPS on.
 
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
       minio:
         condition: service_healthy
@@ -78,11 +81,11 @@ services:
       Smtp__Pass: ${SMTP_PASS}
       Smtp__From: ${SMTP_FROM}
       Smtp__BaseUrl: ${SMTP_BASE_URL}
-    # No host port published: the api is reached only via the web/nginx proxy on the
-    # internal network (and Traefik). This keeps Security:ForwardedHeaders:TrustAllProxies
-    # safe — external clients cannot reach the api directly to spoof X-Forwarded-* headers.
-    expose:
-      - "8080"
+    # Host port published for direct access. NOTE: with Security:ForwardedHeaders:TrustAllProxies
+    # on, clients reaching the api directly can spoof X-Forwarded-* headers — firewall this
+    # port in production or set TrustAllProxies=false.
+    ports:
+      - "${API_PORT:-8080}:8080"
     restart: on-failure
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/live || exit 1"]
@@ -98,6 +101,9 @@ services:
     image: formforge-web:local
     depends_on:
       - api
+    # Non-80 host port so it doesn't collide with Dokploy's Traefik (which owns 80/443).
+    ports:
+      - "${WEB_PORT:-8081}:80"
     # `default` keeps web on the internal network so it can proxy /api -> api:8080;
     # `dokploy-network` lets Traefik reach it for public HTTPS routing.
     networks:

@@ -220,6 +220,7 @@
       "pageIndicator": "Page {{page}} of {{totalPages}}",
       "createSuccess": "Tenant \"{{name}}\" created.",
       "temporaryPasswordNotice": "Share this temporary password with the tenant's admin out-of-band — it will not be shown again.",
+      "devCredentialsNotice": "Developer login for this tenant (email, then password). Keep it internal — never share it with the tenant.",
       "schemaNameConflict": "A tenant with this schema name already exists.",
       "schemaNameInvalid": "This schema name is not valid.",
       "provisioningFailed": "Tenant provisioning failed. The tenant has been recorded with an Error status — check the list below.",

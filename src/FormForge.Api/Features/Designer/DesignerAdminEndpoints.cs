@@ -1,4 +1,5 @@
 using FormForge.Api.Common;
+using FormForge.Api.Common.Endpoints;
 using FormForge.Api.Features.Audit;
 using FormForge.Api.Features.Audit.Dtos;
 using FormForge.Api.Features.Designer.Dtos;
@@ -6,8 +7,10 @@ using FormForge.Api.Features.Designer.Dtos;
 namespace FormForge.Api.Features.Designer;
 
 // Story 5.6 — admin endpoints for inspecting and curating provisioned tables.
-// Mounted under /api/admin/designers (RequirePlatformAdmin inherited from the
-// parent /api/admin group in Program.cs).
+// Mounted under /api/admin/designers. Authorization is per endpoint (the parent
+// /api/admin group requires either role): drift + UNIQUE-constraint management belong to
+// the platform-dev Settings tabs, while the read-only schema audit log is platform-admin
+// only (Audit Logs tab).
 internal static class DesignerAdminEndpoints
 {
     internal static RouteGroupBuilder MapDesignerAdminEndpoints(this RouteGroupBuilder group)
@@ -15,11 +18,13 @@ internal static class DesignerAdminEndpoints
         ArgumentNullException.ThrowIfNull(group);
 
         group.MapGet("/{designerId}/drift", GetDriftHandler)
+             .RequireAuthorization(AuthPolicies.PlatformDev)
              .WithSummary("List orphaned columns for a provisioned designer table")
              .Produces<SchemaDriftResponse>(StatusCodes.Status200OK)
              .Produces(StatusCodes.Status404NotFound);
 
         group.MapDelete("/{designerId}/columns/{columnName}", DropColumnHandler)
+             .RequireAuthorization(AuthPolicies.PlatformDev)
              .WithSummary("Drop an orphaned column from a provisioned designer table")
              .Produces(StatusCodes.Status204NoContent)
              .Produces(StatusCodes.Status404NotFound)
@@ -28,6 +33,7 @@ internal static class DesignerAdminEndpoints
         // Story 5.7 — paginated DDL history per designer. Only GET is mapped;
         // ASP.NET returns 405 for any other verb on this path (AC-2).
         group.MapGet("/{designerId}/audit", AuditEndpoints.GetSchemaAuditLogHandler)
+             .RequireAuthorization(AuthPolicies.PlatformAdmin)
              .WithSummary("Paginated schema change audit log for a designer")
              .Produces<PagedResult<SchemaAuditEntryDto>>(StatusCodes.Status200OK)
              .Produces(StatusCodes.Status404NotFound);
@@ -36,15 +42,18 @@ internal static class DesignerAdminEndpoints
         // /provisioned is a literal segment — it never collides with the
         // /{designerId}/… routes above (different segment count).
         group.MapGet("/provisioned", GetProvisionedDesignersHandler)
+             .RequireAuthorization(AuthPolicies.PlatformDev)
              .WithSummary("List CRUD designers that have a provisioned table")
              .Produces<ProvisionedDesignersResponse>(StatusCodes.Status200OK);
 
         group.MapGet("/{designerId}/unique-constraints", GetUniqueConstraintsHandler)
+             .RequireAuthorization(AuthPolicies.PlatformDev)
              .WithSummary("List columns and existing UNIQUE constraints for a provisioned table")
              .Produces<UniqueConstraintsResponse>(StatusCodes.Status200OK)
              .Produces(StatusCodes.Status404NotFound);
 
         group.MapPost("/{designerId}/unique-constraints", AddUniqueConstraintHandler)
+             .RequireAuthorization(AuthPolicies.PlatformDev)
              .WithSummary("Add a UNIQUE constraint on one or more columns")
              .Produces<UniqueConstraintInfo>(StatusCodes.Status201Created)
              .Produces(StatusCodes.Status404NotFound)
@@ -52,6 +61,7 @@ internal static class DesignerAdminEndpoints
              .Produces(StatusCodes.Status422UnprocessableEntity);
 
         group.MapDelete("/{designerId}/unique-constraints/{constraintName}", DropUniqueConstraintHandler)
+             .RequireAuthorization(AuthPolicies.PlatformDev)
              .WithSummary("Drop a UNIQUE constraint from a provisioned table")
              .Produces(StatusCodes.Status204NoContent)
              .Produces(StatusCodes.Status404NotFound)

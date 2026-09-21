@@ -4,6 +4,7 @@ using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Infrastructure.Persistence;
 using FormForge.Api.Tests.Infrastructure;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -21,6 +22,7 @@ namespace FormForge.Api.Tests.Features.Tenancy;
 public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture>, IAsyncLifetime
 {
     private static readonly Guid TenantAdminRoleId = new("00000000-0000-0000-0000-000000000001");
+    private static readonly Guid PlatformDevRoleId = new("00000000-0000-0000-0000-000000000003");
 
     // Same sensitive-table list the migrations revoke SELECT on for formforge_preview
     // (mirrors TenantOnboardingService.RevokedTables exactly, so a future regression that
@@ -80,7 +82,7 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
         await provisioningSvc.ProvisionSchemaAsync(tenant, CancellationToken.None);
 
         await onboardingSvc.OnboardTenantAsync(
-            tenant, "Admin@Acme.Example", "Acme Admin", "TempPassw0rd!", CancellationToken.None);
+            tenant, "Admin@Acme.Example", "Acme Admin", "TempPassw0rd!", "Dev@Acme.Example", "DevPassw0rd!", CancellationToken.None);
 
         await using var conn = new NpgsqlConnection(_postgres.ConnectionString);
         await conn.OpenAsync();
@@ -117,19 +119,38 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
         // carries the bulk SELECT grant.
         Assert.True(await HasTablePrivilegeAsync(conn, $"\"{tenant.SchemaName}\".menus"));
 
-        // AC-2: exactly one user with a UserRole against the tenant-admin role id.
+        // AC-2: two users — the tenant admin (tenant-admin role) and the hidden developer
+        // (platform-dev role) — each with exactly one UserRole.
         var userCount = await conn.ExecuteScalarAsync<int>(
             $"""SELECT COUNT(*) FROM "{tenant.SchemaName}".users""");
-        Assert.Equal(1, userCount);
+        Assert.Equal(2, userCount);
 
-        var roleIds = (await conn.QueryAsync<Guid>(
-            $"""SELECT role_id FROM "{tenant.SchemaName}".user_roles""")).ToList();
-        var actualRoleId = Assert.Single(roleIds);
-        Assert.Equal(TenantAdminRoleId, actualRoleId);
+        var adminRoleIds = (await conn.QueryAsync<Guid>(
+            $"""
+            SELECT ur.role_id FROM "{tenant.SchemaName}".user_roles ur
+            JOIN "{tenant.SchemaName}".users u ON u.id = ur.user_id
+            WHERE u.email = 'admin@acme.example'
+            """)).ToList();
+        Assert.Equal(TenantAdminRoleId, Assert.Single(adminRoleIds)); // normalized lowercase email
 
-        var seededEmail = await conn.ExecuteScalarAsync<string>(
-            $"""SELECT email FROM "{tenant.SchemaName}".users""");
-        Assert.Equal("admin@acme.example", seededEmail); // normalized lowercase
+        var devRoleIds = (await conn.QueryAsync<Guid>(
+            $"""
+            SELECT ur.role_id FROM "{tenant.SchemaName}".user_roles ur
+            JOIN "{tenant.SchemaName}".users u ON u.id = ur.user_id
+            WHERE u.email = 'dev@acme.example'
+            """)).ToList();
+        Assert.Equal(PlatformDevRoleId, Assert.Single(devRoleIds));
+
+        var devRoleName = await conn.ExecuteScalarAsync<string>(
+            $"""SELECT name FROM "{tenant.SchemaName}".roles WHERE id = @id""",
+            new { id = PlatformDevRoleId });
+        Assert.Equal("platform-dev", devRoleName);
+
+        // Both emails are routed to the tenant via the public index.
+        var indexed = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM public.tenant_user_index WHERE tenant_id = @t",
+            new { t = tenant.Id });
+        Assert.Equal(2, indexed);
 
         // public.datasets / public.formforge_preview grants are untouched by this story.
         Assert.True(await HasTablePrivilegeAsync(conn, "public.menus"));
@@ -139,6 +160,16 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
         var reloaded = await verifyDb.Tenants.SingleAsync(t => t.Id == tenant.Id);
         Assert.Equal("Active", reloaded.Status);
+
+        // Dev credentials persisted on the tenants row: email plain, password only as
+        // Data Protection ciphertext that round-trips through the same protector.
+        Assert.Equal("dev@acme.example", reloaded.DevUserEmail);
+        Assert.NotNull(reloaded.DevUserPasswordEncrypted);
+        Assert.DoesNotContain("DevPassw0rd!", reloaded.DevUserPasswordEncrypted);
+        var protector = verifyScope.ServiceProvider
+            .GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>()
+            .CreateProtector(TenantOnboardingService.DevPasswordProtectorPurpose);
+        Assert.Equal("DevPassw0rd!", protector.Unprotect(reloaded.DevUserPasswordEncrypted!));
     }
 
     // --- DDL step fails ---------------------------------------------------------------
@@ -165,7 +196,7 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
         }
 
         await Assert.ThrowsAnyAsync<Exception>(() => onboardingSvc.OnboardTenantAsync(
-            tenant, "admin@fault.example", "Fault Admin", "TempPassw0rd!", CancellationToken.None));
+            tenant, "admin@fault.example", "Fault Admin", "TempPassw0rd!", "dev2@dev.example", "DevPassw0rd!", CancellationToken.None));
 
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
@@ -217,7 +248,7 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
         }
 
         await Assert.ThrowsAnyAsync<Exception>(() => onboardingSvc.OnboardTenantAsync(
-            tenant, collidingEmail, "Seed Fail Admin", "TempPassw0rd!", CancellationToken.None));
+            tenant, collidingEmail, "Seed Fail Admin", "TempPassw0rd!", "dev3@dev.example", "DevPassw0rd!", CancellationToken.None));
 
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
@@ -277,7 +308,7 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
             await provisioningSvc.ProvisionSchemaAsync(tenant, CancellationToken.None);
 
             await onboardingSvc.OnboardTenantAsync(
-                tenant, "admin@emailfail.example", "Email Fail Admin", "TempPassw0rd!", CancellationToken.None);
+                tenant, "admin@emailfail.example", "Email Fail Admin", "TempPassw0rd!", "dev4@dev.example", "DevPassw0rd!", CancellationToken.None);
 
             using var verifyScope = factory.Services.CreateScope();
             var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
@@ -288,12 +319,47 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
             await conn.OpenAsync();
             var userCount = await conn.ExecuteScalarAsync<int>(
                 $"""SELECT COUNT(*) FROM "{tenant.SchemaName}".users""");
-            Assert.Equal(1, userCount);
+            Assert.Equal(2, userCount); // tenant admin + hidden developer
         }
         finally
         {
             await factory.DisposeAsync();
         }
+    }
+
+    // --- Dev email collides with a platform-super-admin ---------------------------------
+
+    [Fact]
+    public async Task OnboardTenantAsync_DevEmailCollidesWithPlatformAdmin_ThrowsAndLeavesProvisioningWithoutDevCredentials()
+    {
+        using var scope = _factory!.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
+        var provisioningSvc = scope.ServiceProvider.GetRequiredService<ITenantProvisioningService>();
+        var onboardingSvc = scope.ServiceProvider.GetRequiredService<ITenantOnboardingService>();
+
+        var tenant = new Tenant { Name = "Collide Co", SchemaName = "tenant_onboard_dev_collide" };
+        db.Tenants.Add(tenant);
+        db.PlatformAdmins.Add(new PlatformAdmin
+        {
+            UserEmail = "dev-collide@platform.example",
+            PasswordHash = "x",
+        });
+        await db.SaveChangesAsync();
+        await provisioningSvc.ProvisionSchemaAsync(tenant, CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => onboardingSvc.OnboardTenantAsync(
+            tenant, "admin@collide.example", "Collide Admin", "TempPassw0rd!",
+            "Dev-Collide@Platform.Example", "DevPassw0rd!", CancellationToken.None));
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
+        var reloaded = await verifyDb.Tenants.AsNoTracking().SingleAsync(t => t.Id == tenant.Id);
+        Assert.Equal("Provisioning", reloaded.Status);
+        Assert.Null(reloaded.DevUserEmail);
+        Assert.Null(reloaded.DevUserPasswordEncrypted);
+        Assert.Equal(
+            0,
+            await verifyDb.TenantUserIndex.AsNoTracking().CountAsync(e => e.TenantId == tenant.Id));
     }
 
     // --- Duplicate admin email across tenants -------------------------------------------
@@ -337,7 +403,7 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
         {
             var onboardingSvc = scopeA.ServiceProvider.GetRequiredService<ITenantOnboardingService>();
             await onboardingSvc.OnboardTenantAsync(
-                tenantA, sharedEmail, "Admin A", "TempPassw0rd!", CancellationToken.None);
+                tenantA, sharedEmail, "Admin A", "TempPassw0rd!", "dev5@dev.example", "DevPassw0rd!", CancellationToken.None);
         }
 
         using (var scopeB = _factory!.Services.CreateScope())
@@ -345,7 +411,7 @@ public sealed class TenantOnboardingServiceTests : IClassFixture<PostgresFixture
             var onboardingSvc = scopeB.ServiceProvider.GetRequiredService<ITenantOnboardingService>();
             await Assert.ThrowsAsync<DbUpdateException>(
                 () => onboardingSvc.OnboardTenantAsync(
-                    tenantB, sharedEmail, "Admin B", "TempPassw0rd!", CancellationToken.None));
+                    tenantB, sharedEmail, "Admin B", "TempPassw0rd!", "dev6@dev.example", "DevPassw0rd!", CancellationToken.None));
         }
 
         using var verifyScope = _factory.Services.CreateScope();

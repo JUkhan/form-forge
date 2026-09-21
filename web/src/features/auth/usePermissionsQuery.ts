@@ -22,6 +22,10 @@ export interface PermissionsResponse {
 // (Story 2.6 AC-2), so the client must mirror that bypass — see usePermission.
 export const PLATFORM_ADMIN_ROLE_ID = '00000000-0000-0000-0000-000000000001' as const
 
+// Hidden per-tenant developer role (seeded by the SeedPlatformDevRole migration). It does
+// NOT get the platform-admin CRUD bypass; it only unlocks its own Settings tabs.
+export const PLATFORM_DEV_ROLE_ID = '00000000-0000-0000-0000-000000000003' as const
+
 export const PERMISSIONS_QUERY_KEY = ['auth', 'permissions'] as const
 
 export function usePermissionsQuery() {

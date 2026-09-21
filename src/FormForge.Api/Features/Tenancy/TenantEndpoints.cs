@@ -156,11 +156,16 @@ internal static partial class TenantEndpoints
         var adminEmail = $"admin@{ToEmailDomainLabel(schemaName)}.tenant.local";
         const string adminDisplayName = "Tenant Admin";
 
+        // Hidden platform-dev login for this tenant — same email derivation, separate
+        // CSPRNG password. Returned only in this response (and stored encrypted).
+        var devPassword = passwordGenerator.Generate();
+        var devEmail = $"dev@{ToEmailDomainLabel(schemaName)}.tenant.local";
+
         try
         {
             await provisioningService.ProvisionSchemaAsync(tenant, ct).ConfigureAwait(false);
             await onboardingService
-                .OnboardTenantAsync(tenant, adminEmail, adminDisplayName, temporaryPassword, ct)
+                .OnboardTenantAsync(tenant, adminEmail, adminDisplayName, temporaryPassword, devEmail, devPassword, ct)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -209,7 +214,9 @@ internal static partial class TenantEndpoints
             $"/api/admin/tenants/{tenant.Id}",
             new CreateTenantResponse(
                 new TenantDto(tenant.Id, tenant.Name, tenant.SchemaName, tenant.Status, tenant.CreatedAt),
-                temporaryPassword));
+                temporaryPassword,
+                devEmail,
+                devPassword));
     }
 
     // A domain label must start and end with an alphanumeric character (WHATWG email

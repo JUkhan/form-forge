@@ -2,6 +2,7 @@ using System.Data;
 using FormForge.Api.Common;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Auth;
+using FormForge.Api.Features.Permissions;
 using FormForge.Api.Features.Tenancy;
 using FormForge.Api.Features.Users.Dtos;
 using FormForge.Api.Infrastructure.EventBus;
@@ -70,6 +71,12 @@ internal sealed class UserService(
     // `users` row: the tenant's own uq_users_email, and the globally-unique index PK.
     // Both mean "this email is taken" and both map to the same generic 409 — the response
     // must never reveal that the collision came from another tenant.
+    // Every tenant-facing user query goes through this: the hidden platform-dev developer
+    // user (holder of WellKnownRoles.PlatformDevId) is invisible to, and immutable by, admins.
+    // Sort keys/counts are applied on top of this, so listings and totals exclude it too.
+    private IQueryable<User> VisibleUsers =>
+        db.Users.Where(u => !u.UserRoles.Any(ur => ur.RoleId == WellKnownRoles.PlatformDevId));
+
     private static bool IsEmailUniqueViolation(PostgresException pg) =>
         string.Equals(pg.ConstraintName, "uq_users_email", StringComparison.Ordinal)
         || string.Equals(pg.ConstraintName, "PK_tenant_user_index", StringComparison.Ordinal);
@@ -81,7 +88,7 @@ internal sealed class UserService(
     {
         ArgumentNullException.ThrowIfNull(roleIds);
 
-        var userExists = await db.Users
+        var userExists = await VisibleUsers
             .AnyAsync(u => u.Id == userId, ct)
             .ConfigureAwait(false);
 
@@ -97,8 +104,9 @@ internal sealed class UserService(
 
         if (distinctRoleIds.Count > 0)
         {
+            // The hidden platform-dev role is treated exactly like a nonexistent role.
             var foundRoleIds = await db.Roles
-                .Where(r => distinctRoleIds.Contains(r.Id))
+                .Where(r => distinctRoleIds.Contains(r.Id) && r.Id != WellKnownRoles.PlatformDevId)
                 .Select(r => r.Id)
                 .ToListAsync(ct)
                 .ConfigureAwait(false);
@@ -209,7 +217,7 @@ internal sealed class UserService(
         string? status,
         CancellationToken ct)
     {
-        IQueryable<User> query = db.Users;
+        IQueryable<User> query = VisibleUsers;
 
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -244,7 +252,7 @@ internal sealed class UserService(
                 u.Email,
                 u.DisplayName,
                 u.IsActive,
-                u.UserRoles.Count,
+                u.UserRoles.Count(ur => ur.RoleId != WellKnownRoles.PlatformDevId),
                 u.CreatedAt))
             .ToListAsync(ct)
             .ConfigureAwait(false);
@@ -289,7 +297,7 @@ internal sealed class UserService(
     {
         // Single projection populates the role list via the navigation property
         // so the API never round-trips a separate roles query.
-        return await db.Users
+        return await VisibleUsers
             .Where(u => u.Id == id)
             .Select(u => new UserDetailResponse(
                 u.Id,
@@ -299,6 +307,7 @@ internal sealed class UserService(
                 u.CreatedAt,
                 u.UpdatedAt,
                 u.UserRoles
+                    .Where(ur => ur.RoleId != WellKnownRoles.PlatformDevId)
                     .OrderBy(ur => ur.Role.Name)
                     .Select(ur => new UserRoleItem(ur.RoleId, ur.Role.Name))
                     .ToList(),
@@ -450,7 +459,7 @@ internal sealed class UserService(
 
         // Mutating a deactivated user is intentional — supports the "reset password,
         // then reactivate" admin flow. (Story 2.8 code review decision D2.)
-        var user = await db.Users
+        var user = await VisibleUsers
             .FirstOrDefaultAsync(u => u.Id == id, ct)
             .ConfigureAwait(false);
 
@@ -529,7 +538,7 @@ internal sealed class UserService(
             return new DeactivateUserResult(DeactivateUserOutcome.SelfDeactivation);
         }
 
-        var user = await db.Users
+        var user = await VisibleUsers
             .FirstOrDefaultAsync(u => u.Id == id, ct)
             .ConfigureAwait(false);
 
@@ -577,7 +586,7 @@ internal sealed class UserService(
 
     public async Task<ReactivateUserResult> ReactivateUserAsync(Guid id, CancellationToken ct)
     {
-        var user = await db.Users
+        var user = await VisibleUsers
             .FirstOrDefaultAsync(u => u.Id == id, ct)
             .ConfigureAwait(false);
 
@@ -604,7 +613,7 @@ internal sealed class UserService(
 
     public async Task<AdminMfaResetResult> ResetUserMfaAsync(Guid userId, CancellationToken ct)
     {
-        var user = await db.Users
+        var user = await VisibleUsers
             .FirstOrDefaultAsync(u => u.Id == userId, ct)
             .ConfigureAwait(false);
 

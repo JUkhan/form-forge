@@ -19,6 +19,7 @@ namespace FormForge.Api.Tests.Features.Provisioning;
 public sealed class ProvisioningIntegrationTests : IClassFixture<PostgresFixture>, IAsyncLifetime
 {
     private static readonly Guid PlatformAdminRoleId = new("00000000-0000-0000-0000-000000000001");
+    private static readonly Guid PlatformDevRoleId = new("00000000-0000-0000-0000-000000000003");
     private static readonly Guid ViewerRoleId = new("00000000-0000-0000-0000-000000000002");
     private static readonly JsonSerializerOptions WebJsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -2056,6 +2057,19 @@ public sealed class ProvisioningIntegrationTests : IClassFixture<PostgresFixture
                 CreatedAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
             });
         }
+        // Table provisioning / drift / constraints are platform-dev Settings routes: the
+        // seeded admin also holds the (hidden) platform-dev role so its token reaches them.
+        if (!await db.Roles.AnyAsync(r => r.Id == PlatformDevRoleId))
+        {
+            db.Roles.Add(new Role
+            {
+                Id = PlatformDevRoleId,
+                Name = "platform-dev",
+                IsSystem = true,
+                CanManageDatasets = true,
+                CreatedAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            });
+        }
         await db.SaveChangesAsync();
     }
 
@@ -2084,6 +2098,12 @@ public sealed class ProvisioningIntegrationTests : IClassFixture<PostgresFixture
         {
             UserId = admin.Id,
             RoleId = PlatformAdminRoleId,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        db.UserRoles.Add(new UserRole
+        {
+            UserId = admin.Id,
+            RoleId = PlatformDevRoleId,
             CreatedAt = DateTimeOffset.UtcNow,
         });
         db.UserRoles.Add(new UserRole

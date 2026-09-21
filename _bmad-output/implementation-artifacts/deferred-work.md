@@ -915,3 +915,12 @@ Items deferred during code review and other workflows. Each entry links to the s
 - source_spec: `_bmad-output/implementation-artifacts/spec-tenant-user-index-on-user-creation.md`
   summary: A user row whose `public.tenant_user_index` row is missing (or an index row whose user row is missing) cannot be repaired through the API - creation returns 409 forever and no user-delete endpoint exists.
   evidence: Verified: `CreateUserAsync`'s `db.Users.AnyAsync` pre-check fires before any index write, and `UserEndpoints.cs` maps DELETE only for `/{id}/mfa`, so re-creating the user is impossible and manual SQL is the only remedy - which makes the spec's "re-create the user" repair note inaccurate for accounts created before this fix. Settling it needs a product decision: an idempotent repair on create (write the missing index row when the tenant users row already exists) versus an explicit admin repair/delete endpoint versus a documented SQL runbook.
+- source_spec: `_bmad-output/implementation-artifacts/spec-platform-dev-role-seeding.md`
+  summary: Existing tenants have no platform-dev role or dev user, so their admins lose the Datasets, Constraints, Table Provisioning and Component Library tabs.
+  evidence: Backfill was excluded by the 3a decision; existing tenant schemas are not auto-migrated at startup.
+- source_spec: `_bmad-output/implementation-artifacts/spec-platform-dev-role-seeding.md`
+  summary: Add a super-admin reveal/rotate flow for the encrypted dev password stored on tenants.
+  evidence: The password is stored with Data Protection but nothing reads it back.
+- source_spec: `_bmad-output/implementation-artifacts/spec-platform-dev-role-seeding.md`
+  summary: Add an AppLayout test for the gear link target per role.
+  evidence: Gear visibility and homePath are only covered indirectly by the admin-layout guard tests.

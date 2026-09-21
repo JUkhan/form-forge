@@ -9,4 +9,12 @@ internal sealed record CreateTenantRequest(string Name, string SchemaName);
 // it is never persisted in plaintext beyond its BCrypt hash (written by
 // ITenantOnboardingService via IPasswordHasher). The platform-super-admin relays it to
 // the tenant out-of-band.
-internal sealed record CreateTenantResponse(TenantDto Tenant, string TemporaryPassword);
+//
+// DevUserEmail/DevUserPassword are the hidden per-tenant platform-dev login. The password
+// is persisted only as Data Protection ciphertext on the tenants row and is surfaced
+// exclusively here — TenantDto (list/get) never carries either field.
+internal sealed record CreateTenantResponse(
+    TenantDto Tenant,
+    string TemporaryPassword,
+    string DevUserEmail,
+    string DevUserPassword);

@@ -795,6 +795,15 @@ namespace FormForge.Api.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("created_by");
 
+                    b.Property<string>("DevUserEmail")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)")
+                        .HasColumnName("dev_user_email");
+
+                    b.Property<string>("DevUserPasswordEncrypted")
+                        .HasColumnType("text")
+                        .HasColumnName("dev_user_password_encrypted");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)

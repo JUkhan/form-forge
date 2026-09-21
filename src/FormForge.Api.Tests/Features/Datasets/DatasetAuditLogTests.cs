@@ -23,6 +23,7 @@ namespace FormForge.Api.Tests.Features.Datasets;
 public sealed class DatasetAuditLogTests : IClassFixture<PostgresFixture>, IAsyncLifetime
 {
     private static readonly Guid PlatformAdminRoleId = new("00000000-0000-0000-0000-000000000001");
+    private static readonly Guid PlatformDevRoleId = new("00000000-0000-0000-0000-000000000003");
     private static readonly Guid ViewerRoleId = new("00000000-0000-0000-0000-000000000002");
 
     private readonly PostgresFixture _postgres;
@@ -297,6 +298,12 @@ public sealed class DatasetAuditLogTests : IClassFixture<PostgresFixture>, IAsyn
             "INSERT INTO roles (id, name, is_system, can_manage_datasets, created_at)" +
             " VALUES ({0}, 'viewer', true, false, {1}) ON CONFLICT (id) DO NOTHING",
             ViewerRoleId, epoch);
+        // /api/admin/datasets/* is a platform-dev Settings route: the seeded admin also
+        // holds the (hidden) platform-dev role so its token can reach it.
+        await db.Database.ExecuteSqlRawAsync(
+            "INSERT INTO roles (id, name, is_system, can_manage_datasets, created_at)" +
+            " VALUES ({0}, 'platform-dev', true, true, {1}) ON CONFLICT (id) DO NOTHING",
+            PlatformDevRoleId, epoch);
     }
 
     private static async Task<Guid> SeedAdminUserAsync(FormForgeDbContext db)
@@ -316,6 +323,12 @@ public sealed class DatasetAuditLogTests : IClassFixture<PostgresFixture>, IAsyn
         {
             UserId = admin.Id,
             RoleId = PlatformAdminRoleId,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        db.UserRoles.Add(new UserRole
+        {
+            UserId = admin.Id,
+            RoleId = PlatformDevRoleId,
             CreatedAt = DateTimeOffset.UtcNow,
         });
         await db.SaveChangesAsync();

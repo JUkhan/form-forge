@@ -24,4 +24,8 @@ export interface CreateTenantRequest {
 export interface CreateTenantResponse {
   tenant: TenantListItem
   temporaryPassword: string
+  // Hidden per-tenant platform-dev login. Present only in the create response; the
+  // tenant list never exposes either field (the password is stored encrypted server-side).
+  devUserEmail?: string
+  devUserPassword?: string
 }

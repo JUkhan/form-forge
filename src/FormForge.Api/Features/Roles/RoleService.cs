@@ -1,5 +1,6 @@
 using FormForge.Api.Common;
 using FormForge.Api.Domain.Entities;
+using FormForge.Api.Features.Permissions;
 using FormForge.Api.Features.Roles.Dtos;
 using FormForge.Api.Infrastructure.EventBus;
 using FormForge.Api.Infrastructure.Persistence;
@@ -39,7 +40,8 @@ internal sealed class RoleService(FormForgeDbContext db, IDomainEventBus bus) : 
         string? system,
         CancellationToken ct)
     {
-        IQueryable<Role> query = db.Roles;
+        // The hidden platform-dev role never appears in any tenant-facing role list.
+        IQueryable<Role> query = db.Roles.Where(r => r.Id != WellKnownRoles.PlatformDevId);
 
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -117,7 +119,7 @@ internal sealed class RoleService(FormForgeDbContext db, IDomainEventBus bus) : 
     {
         var role = await db.Roles
             .Include(r => r.Permissions)
-            .FirstOrDefaultAsync(r => r.Id == id, ct)
+            .FirstOrDefaultAsync(r => r.Id == id && r.Id != WellKnownRoles.PlatformDevId, ct)
             .ConfigureAwait(false);
 
         return role is null ? null : ToResponse(role);
@@ -128,6 +130,13 @@ internal sealed class RoleService(FormForgeDbContext db, IDomainEventBus bus) : 
         ArgumentNullException.ThrowIfNull(request);
 
         var normalized = request.Name.Trim().ToLowerInvariant();
+
+        // Reserved: JWT gating is by role name, so this name must never be creatable.
+        // Same outcome as any existing duplicate name so nothing is revealed.
+        if (string.Equals(normalized, WellKnownRoles.PlatformDevName, StringComparison.Ordinal))
+        {
+            return new CreateRoleResult(CreateRoleOutcome.DuplicateName);
+        }
 
         var exists = await db.Roles
             .AnyAsync(r => r.Name == normalized, ct)
@@ -188,7 +197,7 @@ internal sealed class RoleService(FormForgeDbContext db, IDomainEventBus bus) : 
 
         var role = await db.Roles
             .Include(r => r.Permissions)
-            .FirstOrDefaultAsync(r => r.Id == id, ct)
+            .FirstOrDefaultAsync(r => r.Id == id && r.Id != WellKnownRoles.PlatformDevId, ct)
             .ConfigureAwait(false);
 
         if (role is null)
@@ -202,6 +211,11 @@ internal sealed class RoleService(FormForgeDbContext db, IDomainEventBus bus) : 
         }
 
         var normalized = request.Name.Trim().ToLowerInvariant();
+
+        if (string.Equals(normalized, WellKnownRoles.PlatformDevName, StringComparison.Ordinal))
+        {
+            return new UpdateRoleResult(UpdateRoleOutcome.DuplicateName);
+        }
 
         var nameConflict = await db.Roles
             .AnyAsync(r => r.Name == normalized && r.Id != id, ct)
@@ -269,7 +283,7 @@ internal sealed class RoleService(FormForgeDbContext db, IDomainEventBus bus) : 
     {
         var role = await db.Roles
             .Include(r => r.UserRoles)
-            .FirstOrDefaultAsync(r => r.Id == id, ct)
+            .FirstOrDefaultAsync(r => r.Id == id && r.Id != WellKnownRoles.PlatformDevId, ct)
             .ConfigureAwait(false);
 
         if (role is null)

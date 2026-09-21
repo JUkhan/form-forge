@@ -306,8 +306,9 @@ internal sealed class MenuService(
 
         if (distinctRoleIds.Count > 0)
         {
+            // The hidden platform-dev role is treated exactly like a nonexistent role.
             var foundRoleIds = await db.Roles
-                .Where(r => distinctRoleIds.Contains(r.Id))
+                .Where(r => distinctRoleIds.Contains(r.Id) && r.Id != WellKnownRoles.PlatformDevId)
                 .Select(r => r.Id)
                 .ToListAsync(ct)
                 .ConfigureAwait(false);
@@ -789,7 +790,10 @@ internal sealed class MenuService(
             ParseIcon(menu.Icon),
             menu.IsActive,
             menu.ParentId,
-            menu.RoleAssignments.Select(r => r.RoleId).ToList(),
+            menu.RoleAssignments
+                .Where(r => r.RoleId != WellKnownRoles.PlatformDevId)
+                .Select(r => r.RoleId)
+                .ToList(),
             menu.CreatedAt,
             menu.UpdatedAt,
             // Story 5.2 — binding fields, all nullable; null for unbound section headers.

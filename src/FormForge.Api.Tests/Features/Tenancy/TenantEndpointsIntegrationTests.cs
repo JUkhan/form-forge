@@ -257,6 +257,31 @@ public sealed class TenantEndpointsIntegrationTests : IClassFixture<PostgresFixt
         using var listResponse = await _client!.SendAsync(listRequest);
         var list = await listResponse.Content.ReadFromJsonAsync<PagedResultDto<TenantDto>>();
         Assert.Contains(list!.Data, t => t.SchemaName == schemaName && t.Status == "Active");
+
+        // Hidden platform-dev login: returned by the create response only, never by the
+        // tenant list, and stored encrypted (not as the plaintext password) on the row.
+        Assert.Equal("dev@tenant-e2e-create-ok.tenant.local", body.DevUserEmail);
+        Assert.True(body.DevUserPassword.Length >= 8);
+        Assert.NotEqual(body.TemporaryPassword, body.DevUserPassword);
+        using var rawListResponse = await _client!.SendAsync(new HttpRequestMessage(HttpMethod.Get, "/api/admin/tenants")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+        });
+        var rawList = await rawListResponse.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("devUser", rawList, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(body.DevUserPassword, rawList, StringComparison.Ordinal);
+
+        using var scope = _factory!.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FormForgeDbContext>();
+        var stored = await db.Tenants.AsNoTracking().SingleAsync(t => t.SchemaName == schemaName);
+        Assert.Equal(body.DevUserEmail, stored.DevUserEmail);
+        Assert.NotNull(stored.DevUserPasswordEncrypted);
+        Assert.DoesNotContain(body.DevUserPassword, stored.DevUserPasswordEncrypted, StringComparison.Ordinal);
+
+        // The dev can actually log in and carries the platform-dev role.
+        using var devLogin = await _client!.PostAsJsonAsync(
+            "/api/auth/login", new { email = body.DevUserEmail, password = body.DevUserPassword });
+        Assert.Equal(HttpStatusCode.OK, devLogin.StatusCode);
     }
 
     [Fact]
@@ -287,10 +312,14 @@ public sealed class TenantEndpointsIntegrationTests : IClassFixture<PostgresFixt
             .Where(t => t.SchemaName == schemaName)
             .Select(t => t.Id)
             .SingleAsync();
-        var indexEntry = await db.Set<TenantUserIndexEntry>().AsNoTracking()
-            .SingleAsync(e => e.TenantId == tenantId);
-        var domainPart = indexEntry.Email.Split('@')[1];
-        Assert.DoesNotContain('_', domainPart);
+        // Two index rows per tenant now: the tenant admin and the hidden platform-dev user.
+        var indexEntries = await db.Set<TenantUserIndexEntry>().AsNoTracking()
+            .Where(e => e.TenantId == tenantId)
+            .ToListAsync();
+        Assert.Equal(2, indexEntries.Count);
+        Assert.All(indexEntries, e => Assert.DoesNotContain('_', e.Email.Split('@')[1]));
+        Assert.Contains(indexEntries, e => e.Email == "dev@tenant-underscore-1.tenant.local");
+        var indexEntry = indexEntries.Single(e => e.Email.StartsWith("admin@", StringComparison.Ordinal));
         Assert.Equal("admin@tenant-underscore-1.tenant.local", indexEntry.Email);
 
         // The whole point: the derived admin can actually log in with this email.
@@ -457,5 +486,6 @@ public sealed class TenantEndpointsIntegrationTests : IClassFixture<PostgresFixt
 
     [SuppressMessage("Performance", "CA1812",
         Justification = "Instantiated by System.Text.Json deserialization.")]
-    private sealed record CreateTenantResponseDto(TenantDto Tenant, string TemporaryPassword);
+    private sealed record CreateTenantResponseDto(
+        TenantDto Tenant, string TemporaryPassword, string DevUserEmail, string DevUserPassword);
 }

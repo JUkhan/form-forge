@@ -87,6 +87,22 @@ export function TenantsPage() {
             </p>
             <CopyPasswordButton password={justCreated.temporaryPassword} />
           </div>
+          {justCreated.devUserEmail && justCreated.devUserPassword && (
+            <>
+              <p className="text-muted-foreground">{t('admin.tenants.devCredentialsNotice')}</p>
+              <div className="flex items-center gap-2">
+                <p className="flex-1 rounded bg-muted px-2 py-1.5 font-mono text-sm break-all">
+                  {justCreated.devUserEmail}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <p className="flex-1 rounded bg-muted px-2 py-1.5 font-mono text-sm break-all">
+                  {justCreated.devUserPassword}
+                </p>
+                <CopyPasswordButton password={justCreated.devUserPassword} />
+              </div>
+            </>
+          )}
           <Button variant="ghost" size="sm" onClick={() => setJustCreated(null)}>
             {t('admin.tenants.dismissButton')}
           </Button>

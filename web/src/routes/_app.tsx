@@ -6,7 +6,7 @@ import { tokenStore } from '../features/auth/tokenStore'
 import { refreshSession } from '../features/auth/refreshCoordinator'
 import { sessionCache } from '../features/auth/sessionCache'
 import { useAuthQuery } from '../features/auth/useAuthQuery'
-import { usePermission } from '../features/auth/usePermission'
+import { useSettingsAccess } from '../features/auth/settingsAccess'
 import { usePermissionsQuery } from '../features/auth/usePermissionsQuery'
 import { PermissionGate } from '../components/shared/PermissionGate'
 import { Navbar } from '../components/shared/Navbar'
@@ -70,10 +70,9 @@ function AppLayout() {
     .map((p) => p[0]?.toUpperCase() ?? '')
     .join('') || '·'
 
-  // Demo gate: platform-admin role bypass returns true for any resource;
-  // for every other user perResource['platform-admin'] is undefined → hidden.
-  // Proves AC-1 (absent, not disabled) and AC-3 (no JWT parsing).
-  const canSeeAdmin = usePermission('platform-admin', 'canRead')
+  // Gear icon: shown for platform-admin AND the hidden platform-dev role; each sees its
+  // own tab set inside (see settingsAccess.ts). Absent, not disabled, for everyone else.
+  const { hasAccess: canSeeAdmin, homePath: settingsHome } = useSettingsAccess()
 
   return (
     // Height-constrained app shell. The outer container is exactly 100vh and
@@ -133,7 +132,7 @@ function AppLayout() {
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button asChild variant="ghost" size="icon-sm">
-                  <Link to="/admin/users" aria-label={t('nav.settings')}>
+                  <Link to={settingsHome} aria-label={t('nav.settings')}>
                     <SettingsIcon className="h-4 w-4" />
                   </Link>
                 </Button>

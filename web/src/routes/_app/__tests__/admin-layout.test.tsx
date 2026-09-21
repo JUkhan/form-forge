@@ -16,7 +16,10 @@ const mockUseLocation = vi.fn<() => { pathname: string }>(() => ({ pathname: '/a
 const routeCapture = vi.hoisted(() => ({
   beforeLoad: undefined as
     | undefined
-    | ((ctx: { context: { queryClient: unknown } }) => Promise<void>),
+    | ((ctx: {
+        context: { queryClient: unknown }
+        location?: { pathname: string }
+      }) => Promise<void>),
 }))
 
 vi.mock('@tanstack/react-router', () => ({
@@ -34,41 +37,64 @@ vi.mock('@tanstack/react-router', () => ({
   redirect: vi.fn().mockImplementation((args: unknown) => args),
 }))
 
+// AdminLayout reads the signed-in user's role set via usePermissionsQuery; stub it so the
+// layout can render without a QueryClientProvider. Everything else in the module is real.
+const permissionsHandle = vi.hoisted(() => ({
+  data: undefined as undefined | { isActive: boolean; roleIds: string[] },
+}))
+vi.mock('../../../features/auth/usePermissionsQuery', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../features/auth/usePermissionsQuery')>()),
+  usePermissionsQuery: () => ({ data: permissionsHandle.data }),
+}))
+
 // Imports must come AFTER vi.mock so the module binds the stubs.
 import { AdminBreadcrumb, AdminLayout } from '../admin'
 import { redirect } from '@tanstack/react-router'
 
-// PLATFORM_ADMIN_ROLE_ID = '00000000-0000-0000-0000-000000000001' (seeded constant from usePermissionsQuery.ts)
+// Seeded constants from usePermissionsQuery.ts
 const PLATFORM_ADMIN_ROLE_ID = '00000000-0000-0000-0000-000000000001'
+const PLATFORM_DEV_ROLE_ID = '00000000-0000-0000-0000-000000000003'
+
+function renderTabs(roleIds: string[]) {
+  permissionsHandle.data = { isActive: true, roleIds }
+  const { container } = render(<AdminLayout />)
+  const adminNav = container.querySelector('nav[aria-label="admin"]')
+  expect(adminNav).not.toBeNull()
+  return Array.from(adminNav!.querySelectorAll('a')).map((a) => ({
+    text: a.textContent,
+    href: a.getAttribute('href'),
+  }))
+}
 
 describe('AdminLayout', () => {
   afterEach(() => {
     cleanup()
+    permissionsHandle.data = undefined
     mockUseLocation.mockReturnValue({ pathname: '/admin/users' })
   })
 
-  it('renders all sub-nav links: Users, Roles, Menus, Datasets, Constraints, Table Provisioning, Component Library, Audit Logs', () => {
-    const { container } = render(<AdminLayout />)
-    const adminNav = container.querySelector('nav[aria-label="admin"]')
-    expect(adminNav).not.toBeNull()
-    const links = adminNav!.querySelectorAll('a')
-    expect(links.length).toBe(8)
-    expect(links[0].textContent).toBe('admin.users.title')
-    expect(links[0].getAttribute('href')).toBe('/admin/users')
-    expect(links[1].textContent).toBe('admin.roles.title')
-    expect(links[1].getAttribute('href')).toBe('/admin/roles')
-    expect(links[2].textContent).toBe('admin.menus.title')
-    expect(links[2].getAttribute('href')).toBe('/admin/menus')
-    expect(links[3].textContent).toBe('admin.datasets.navTitle')
-    expect(links[3].getAttribute('href')).toBe('/admin/datasets')
-    expect(links[4].textContent).toBe('admin.constraints.navTitle')
-    expect(links[4].getAttribute('href')).toBe('/admin/constraints')
-    expect(links[5].textContent).toBe('admin.tableProvisioning.navTitle')
-    expect(links[5].getAttribute('href')).toBe('/admin/table-provisioning')
-    expect(links[6].textContent).toBe('designer.nav.library')
-    expect(links[6].getAttribute('href')).toBe('/designer/library')
-    expect(links[7].textContent).toBe('admin.audit.navTitle')
-    expect(links[7].getAttribute('href')).toBe('/admin/audit')
+  it('platform-admin sees exactly Users, Roles, Menus, Audit Logs', () => {
+    expect(renderTabs([PLATFORM_ADMIN_ROLE_ID])).toEqual([
+      { text: 'admin.users.title', href: '/admin/users' },
+      { text: 'admin.roles.title', href: '/admin/roles' },
+      { text: 'admin.menus.title', href: '/admin/menus' },
+      { text: 'admin.audit.navTitle', href: '/admin/audit' },
+    ])
+  })
+
+  it('platform-dev sees exactly Roles, Menus, Datasets, Constraints, Table Provisioning, Component Library', () => {
+    expect(renderTabs([PLATFORM_DEV_ROLE_ID])).toEqual([
+      { text: 'admin.roles.title', href: '/admin/roles' },
+      { text: 'admin.menus.title', href: '/admin/menus' },
+      { text: 'admin.datasets.navTitle', href: '/admin/datasets' },
+      { text: 'admin.constraints.navTitle', href: '/admin/constraints' },
+      { text: 'admin.tableProvisioning.navTitle', href: '/admin/table-provisioning' },
+      { text: 'designer.nav.library', href: '/designer/library' },
+    ])
+  })
+
+  it('renders no tabs for a user with neither role', () => {
+    expect(renderTabs(['00000000-0000-0000-0000-000000000002'])).toEqual([])
   })
 })
 
@@ -157,5 +183,49 @@ describe('Admin route beforeLoad guard (AC-3)', () => {
       routeCapture.beforeLoad!({ context: { queryClient: mockQueryClient } })
     ).resolves.toBeUndefined()
     expect(redirect).not.toHaveBeenCalled()
+  })
+
+  it('allows a platform-dev into its own sections and bounces it off admin-only ones', async () => {
+    const qc = {
+      ensureQueryData: vi.fn().mockResolvedValue({
+        isActive: true,
+        roleIds: [PLATFORM_DEV_ROLE_ID],
+      }),
+    }
+    await expect(
+      routeCapture.beforeLoad!({ context: { queryClient: qc }, location: { pathname: '/admin/datasets' } }),
+    ).resolves.toBeUndefined()
+    expect(redirect).not.toHaveBeenCalled()
+
+    await expect(
+      routeCapture.beforeLoad!({ context: { queryClient: qc }, location: { pathname: '/admin/users' } }),
+    ).rejects.toBeDefined()
+    expect(redirect).toHaveBeenCalledWith({ to: '/admin/roles' })
+  })
+
+  it('bounces a platform-admin off dev-only sections', async () => {
+    const qc = {
+      ensureQueryData: vi.fn().mockResolvedValue({
+        isActive: true,
+        roleIds: [PLATFORM_ADMIN_ROLE_ID],
+      }),
+    }
+    await expect(
+      routeCapture.beforeLoad!({ context: { queryClient: qc }, location: { pathname: '/admin/datasets' } }),
+    ).rejects.toBeDefined()
+    expect(redirect).toHaveBeenCalledWith({ to: '/admin/users' })
+  })
+
+  it('denies an inactive platform-dev', async () => {
+    const qc = {
+      ensureQueryData: vi.fn().mockResolvedValue({
+        isActive: false,
+        roleIds: [PLATFORM_DEV_ROLE_ID],
+      }),
+    }
+    await expect(
+      routeCapture.beforeLoad!({ context: { queryClient: qc } }),
+    ).rejects.toBeDefined()
+    expect(redirect).toHaveBeenCalledWith({ to: '/' })
   })
 })

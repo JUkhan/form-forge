@@ -17,5 +17,7 @@ internal interface ITenantOnboardingService
         string adminEmail,
         string adminDisplayName,
         string adminTemporaryPassword,
+        string devEmail,
+        string devTemporaryPassword,
         CancellationToken ct);
 }

@@ -456,6 +456,8 @@ internal sealed class FormForgeDbContext(DbContextOptions<FormForgeDbContext> op
             e.Property(tn => tn.Status).HasColumnName("status").IsRequired().HasDefaultValue("Provisioning").HasMaxLength(20);
             e.Property(tn => tn.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
             e.Property(tn => tn.CreatedBy).HasColumnName("created_by");
+            e.Property(tn => tn.DevUserEmail).HasColumnName("dev_user_email").HasMaxLength(320);
+            e.Property(tn => tn.DevUserPasswordEncrypted).HasColumnName("dev_user_password_encrypted").HasColumnType("text");
             e.HasIndex(tn => tn.SchemaName).IsUnique().HasDatabaseName("uq_tenants_schema_name");
             e.HasIndex(tn => tn.CreatedBy).HasDatabaseName("idx_tenants_created_by");
             e.HasOne<PlatformAdmin>()

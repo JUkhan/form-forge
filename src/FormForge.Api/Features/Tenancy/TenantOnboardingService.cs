@@ -2,7 +2,9 @@ using Dapper;
 using FormForge.Api.Domain.Entities;
 using FormForge.Api.Features.Auth;
 using FormForge.Api.Features.Designer;
+using FormForge.Api.Features.Permissions;
 using FormForge.Api.Infrastructure.Persistence;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -28,8 +30,17 @@ internal sealed partial class TenantOnboardingService(
     IEmailService emailService,
     IOptions<SmtpOptions> smtpOptions,
     IPasswordHasher passwordHasher,
+    IDataProtectionProvider dataProtectionProvider,
     ILogger<TenantOnboardingService> logger) : ITenantOnboardingService
 {
+    // Purpose string for the Data Protection protector that encrypts the per-tenant
+    // developer password stored on public.tenants (never plaintext, never logged).
+    internal const string DevPasswordProtectorPurpose = "FormForge.Tenants.DevUserPassword";
+
+    // The hidden platform-dev role's deterministic id, seeded by the SeedPlatformDevRole
+    // migration into every tenant schema via Story 12.2's replay.
+    private static readonly Guid PlatformDevRoleId = WellKnownRoles.PlatformDevId;
+
     // The tenant-admin role's deterministic id, seeded by the static migration set
     // (CreateRolesRolePermissionsAndUserRoles) into every tenant schema via Story 12.2's
     // replay. Reused as-is — this service never inserts a new role row.
@@ -50,12 +61,16 @@ internal sealed partial class TenantOnboardingService(
         string adminEmail,
         string adminDisplayName,
         string adminTemporaryPassword,
+        string devEmail,
+        string devTemporaryPassword,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(tenant);
         ArgumentException.ThrowIfNullOrEmpty(adminEmail);
         ArgumentException.ThrowIfNullOrEmpty(adminDisplayName);
         ArgumentException.ThrowIfNullOrEmpty(adminTemporaryPassword);
+        ArgumentException.ThrowIfNullOrWhiteSpace(devEmail);
+        ArgumentException.ThrowIfNullOrEmpty(devTemporaryPassword);
 
         // Re-validate schema_name the same defense-in-depth way Story 12.2 does — this
         // service must never trust that Tenant.SchemaName is safe to interpolate into DDL,
@@ -119,6 +134,7 @@ internal sealed partial class TenantOnboardingService(
         var csb = new NpgsqlConnectionStringBuilder(baseConnectionString) { SearchPath = schemaName };
         var tenantConnection = new NpgsqlConnection(csb.ConnectionString);
         User adminUser;
+        var normalizedDevEmail = devEmail.Trim().ToLowerInvariant();
         try
         {
             var options = new DbContextOptionsBuilder<FormForgeDbContext>()
@@ -146,6 +162,24 @@ internal sealed partial class TenantOnboardingService(
                 {
                     User = adminUser,
                     RoleId = TenantAdminRoleId,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                });
+
+                // The hidden platform-dev developer user — same navigation-fixup shape as
+                // the admin above, in the same SaveChangesAsync so both commit together.
+                var devUser = new User
+                {
+                    Email = normalizedDevEmail,
+                    DisplayName = "Platform Developer",
+                    PasswordHash = passwordHasher.Hash(devTemporaryPassword),
+                    IsActive = true,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                };
+                tenantDb.Users.Add(devUser);
+                tenantDb.UserRoles.Add(new UserRole
+                {
+                    User = devUser,
+                    RoleId = PlatformDevRoleId,
                     CreatedAt = DateTimeOffset.UtcNow,
                 });
 
@@ -220,11 +254,36 @@ internal sealed partial class TenantOnboardingService(
                 $"Cannot onboard tenant '{tenant.Id}': email '{adminUser.Email}' is already registered as a platform-super-admin.");
         }
 
+        // Same guard for the developer's email (a collision here would equally lock the
+        // dev out, or misroute them into the platform-super-admin tier).
+        var devPlatformAdminCollision = await db.PlatformAdmins
+            .AsNoTracking()
+            .AnyAsync(p => p.UserEmail == normalizedDevEmail, ct)
+            .ConfigureAwait(false);
+        if (devPlatformAdminCollision)
+        {
+            throw new InvalidOperationException(
+                $"Cannot onboard tenant '{tenant.Id}': the derived developer email is already registered as a platform-super-admin.");
+        }
+
         db.TenantUserIndex.Add(new TenantUserIndexEntry
         {
             Email = adminUser.Email,
             TenantId = tenant.Id,
         });
+        db.TenantUserIndex.Add(new TenantUserIndexEntry
+        {
+            Email = normalizedDevEmail,
+            TenantId = tenant.Id,
+        });
+
+        // Persist the dev credentials on the tenants row: email plain, password only as
+        // Data Protection ciphertext. Written in the same SaveChanges as the activation so
+        // a failure leaves the tenant Provisioning with no credentials recorded.
+        trackedTenant.DevUserEmail = normalizedDevEmail;
+        trackedTenant.DevUserPasswordEncrypted = dataProtectionProvider
+            .CreateProtector(DevPasswordProtectorPurpose)
+            .Protect(devTemporaryPassword);
 
         trackedTenant.Status = "Active";
         await db.SaveChangesAsync(ct).ConfigureAwait(false);

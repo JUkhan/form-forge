@@ -15,7 +15,7 @@ internal static class DesignerEndpoints
         // users so the DynamicComponent data-entry renderer (Epic 6) can fetch
         // schemas without an admin role.
         group.MapPost("/", CreateDesignerHandler)
-             .RequireAuthorization("platform-admin")
+             .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
              .AddValidationFilter<CreateDesignerRequest>()
              .WithSummary("Create a new designer")
              .Produces<DesignerResponse>(StatusCodes.Status201Created)
@@ -37,7 +37,7 @@ internal static class DesignerEndpoints
              .Produces(StatusCodes.Status404NotFound);
 
         group.MapPost("/{designerId}/versions", SaveVersionHandler)
-             .RequireAuthorization("platform-admin")
+             .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
              .AddValidationFilter<SaveVersionRequest>()
              .WithSummary("Create a new version snapshot of a designer")
              .Produces<DesignerResponse>(StatusCodes.Status201Created)
@@ -46,7 +46,7 @@ internal static class DesignerEndpoints
              .Produces(StatusCodes.Status422UnprocessableEntity);
 
         group.MapPut("/{designerId}/versions/{version:int}", UpdateVersionHandler)
-             .RequireAuthorization("platform-admin")
+             .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
              .AddValidationFilter<UpdateVersionRequest>()
              .WithSummary("Update a version's content in place (no new snapshot)")
              .Produces<DesignerResponse>(StatusCodes.Status200OK)
@@ -54,21 +54,21 @@ internal static class DesignerEndpoints
              .Produces(StatusCodes.Status422UnprocessableEntity);
 
         group.MapPut("/{designerId}/versions/{version:int}/auth-filter", SetAuthFilterFieldKeyHandler)
-             .RequireAuthorization("platform-admin")
+             .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
              .WithSummary("Set or clear a version's auth filter fieldKey")
              .Produces<DesignerResponse>(StatusCodes.Status200OK)
              .Produces(StatusCodes.Status404NotFound)
              .Produces(StatusCodes.Status422UnprocessableEntity);
 
         group.MapPut("/{designerId}/versions/{version:int}/dataset", SetDatasetHandler)
-             .RequireAuthorization("platform-admin")
+             .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
              .WithSummary("Set or clear a version's bound dataset")
              .Produces<DesignerResponse>(StatusCodes.Status200OK)
              .Produces(StatusCodes.Status404NotFound)
              .Produces(StatusCodes.Status422UnprocessableEntity);
 
         group.MapPost("/{designerId}/duplicate", DuplicateDesignerHandler)
-             .RequireAuthorization("platform-admin")
+             .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
              .WithSummary("Duplicate a designer to a new copy")
              .Produces<DesignerResponse>(StatusCodes.Status201Created)
              .Produces(StatusCodes.Status404NotFound)
@@ -76,7 +76,7 @@ internal static class DesignerEndpoints
              .Produces(StatusCodes.Status422UnprocessableEntity);
 
         group.MapPut("/{designerId}/versions/{version:int}/status", UpdateVersionStatusHandler)
-             .RequireAuthorization("platform-admin")
+             .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
              .AddValidationFilter<UpdateVersionStatusRequest>()
              .WithSummary("Publish or archive a designer version")
              .Produces<DesignerResponse>(StatusCodes.Status200OK)

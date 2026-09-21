@@ -360,6 +360,11 @@ builder.Services.AddAuthorization(options =>
     // Role claim type is "roles" (see JwtBearerOptions.RoleClaimType above). The
     // "platform-admin" policy is required by RequirePlatformAdmin() on /api/admin/*.
     options.AddPolicy("platform-admin", policy => policy.RequireRole("platform-admin"));
+    // Hidden per-tenant developer role: Settings tabs Roles, Menus, Datasets, Constraints,
+    // Table Provisioning and Component Library. "platform-admin-or-dev" backs the routes
+    // shared by both roles (roles, menus, audit reads).
+    options.AddPolicy(AuthPolicies.PlatformDev, policy => policy.RequireRole("platform-dev"));
+    options.AddPolicy(AuthPolicies.PlatformAdminOrDev, policy => policy.RequireRole("platform-admin", "platform-dev"));
     // Story 12.4 — "platform-super-admin" policy backs RequirePlatformSuperAdmin(),
     // an unused extension left for Story 12.5's /api/admin/tenants/* group to consume.
     options.AddPolicy("platform-super-admin", policy => policy.RequireRole("platform-super-admin"));
@@ -735,9 +740,10 @@ app.MapGroup("/api/auth")
    .WithTags("Authentication")
    .MapAuthEndpoints();
 
+// Role gating is per route group inside MapAdminEndpoints (platform-admin vs platform-dev).
 app.MapGroup("/api/admin")
    .RequireAuth()
-   .RequirePlatformAdmin()
+   .RequireAuthorization(AuthPolicies.PlatformAdminOrDev)
    .RequireRateLimiting("admin")
    .WithTags("Admin")
    .MapAdminEndpoints();

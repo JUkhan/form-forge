@@ -1,3 +1,4 @@
+using FormForge.Api.Features.Permissions;
 using FormForge.Api.Features.Users.Dtos;
 using FormForge.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -32,7 +33,8 @@ internal static class ActiveUsersEndpoints
         // Projection straight to the DTO keeps the query read-only (no entity
         // tracking) and never materializes the password hash / MFA secret columns.
         var users = await db.Users
-            .Where(u => u.IsActive)
+            .Where(u => u.IsActive
+                && !u.UserRoles.Any(ur => ur.RoleId == WellKnownRoles.PlatformDevId))
             .OrderBy(u => u.DisplayName)
             .ThenBy(u => u.Email)
             .Select(u => new ActiveUserDto(u.Id, u.Email, u.DisplayName))

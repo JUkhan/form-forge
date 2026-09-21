@@ -16,4 +16,10 @@ internal sealed class Tenant
     // FK to platform_admins.id (Story 12.4), configured in FormForgeDbContext with no
     // navigation property — SetNull on delete, same posture as DatasetAuditLogEntry.ActorId.
     public Guid? CreatedBy { get; set; }
+
+    // Hidden per-tenant developer (platform-dev) login. Email is plain; the password is
+    // stored only as ASP.NET Core Data Protection ciphertext (never plaintext) so the
+    // platform-super-admin can be shown it. Never exposed by the tenant list/get DTOs.
+    public string? DevUserEmail { get; set; }
+    public string? DevUserPasswordEncrypted { get; set; }
 }

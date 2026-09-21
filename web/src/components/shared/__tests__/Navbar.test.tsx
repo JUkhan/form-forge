@@ -23,6 +23,12 @@ vi.mock('../../../features/menu/useNavMenusQuery', () => ({
   NAV_MENUS_QUERY_KEY: ['menus', 'nav'],
 }))
 
+let tenantStub: { data?: { name: string } } = {}
+
+vi.mock('../../../features/tenant/useCurrentTenantQuery', () => ({
+  useCurrentTenantQuery: () => tenantStub,
+}))
+
 // Imports must come AFTER vi.mock so the module binds the stub.
 import { Navbar } from '../Navbar'
 
@@ -34,6 +40,17 @@ describe('Navbar', () => {
   afterEach(() => {
     cleanup()
     setQuery({ data: [], isPending: false, isError: false })
+    tenantStub = {}
+  })
+
+  it('shows the tenant name as the brand, falling back to nav.brandName', () => {
+    const { getAllByText, queryByText, rerender } = render(<Navbar />)
+    expect(getAllByText('nav.brandName').length).toBeGreaterThan(0)
+
+    tenantStub = { data: { name: 'Acme Corp' } }
+    rerender(<Navbar />)
+    expect(getAllByText('Acme Corp').length).toBeGreaterThan(0)
+    expect(queryByText('nav.brandName')).toBeNull()
   })
 
   it('renders the empty message when data is an empty array', () => {

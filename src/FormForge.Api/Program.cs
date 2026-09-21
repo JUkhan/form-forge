@@ -765,6 +765,7 @@ app.MapGroup("/api/users")
    .RequireRateLimiting("admin")
    .WithTags("Users")
    .MapUserSelfEndpoints()
+   .MapTenantSelfEndpoints()
    .MapActiveUserEndpoints()
    .MapMePreferencesEndpoints();
 

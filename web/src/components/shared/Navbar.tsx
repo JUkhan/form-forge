@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, LayoutDashboard, Menu as MenuIcon, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavMenusQuery } from '../../features/menu/useNavMenusQuery'
+import { useCurrentTenantQuery } from '../../features/tenant/useCurrentTenantQuery'
 import { NavLucideIcon } from '../icons/NavLucideIcon'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { NavMenuItem } from '../../features/menu/types'
@@ -23,6 +24,7 @@ import type { MenuIcon as MenuIconType } from '../../features/menu/types'
 export function Navbar() {
   const { t } = useTranslation()
   const { data, isPending, isError } = useNavMenusQuery()
+  const { data: tenant } = useCurrentTenantQuery()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [openParents, setOpenParents] = useState<Set<string>>(() => new Set())
 
@@ -90,7 +92,7 @@ export function Navbar() {
             <LayoutDashboard className="h-4 w-4" />
           </div>
           <span className="text-sm font-bold tracking-tight text-sidebar-foreground">
-            {t('nav.brandName')}
+            {tenant?.name ?? t('nav.brandName')}
           </span>
         </div>
 

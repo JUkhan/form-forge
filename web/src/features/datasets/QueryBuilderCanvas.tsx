@@ -32,8 +32,19 @@ import {
   AddCalculatedColumnContext,
   DeleteCalculatedColumnContext,
   SelectCalculatedColumnContext,
+  RemoveNodeContext,
   type TableNodeType,
 } from '../../components/query-builder/TableNode'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { CaseColumnEditor } from '../../components/query-builder/CaseColumnEditor'
 import { CalculatedColumnEditor } from '../../components/query-builder/CalculatedColumnEditor'
 import {
@@ -108,7 +119,12 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
     initialState.edges as JoinEdgeType[],
   )
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, deleteElements } = useReactFlow()
+  // Node ids awaiting delete confirmation (null = dialog closed). Both the node's remove
+  // button and the Delete/Backspace key route through here so removal is always confirmed.
+  const [pendingRemoveIds, setPendingRemoveIds] = useState<string[] | null>(null)
+  // Lets the confirmed deleteElements() call pass through onBeforeDelete without re-prompting.
+  const confirmedDeleteRef = useRef(false)
   // Used to lazily fetch (and cache) a table's columns on drop — the palette only
   // carries names + counts, so columns are loaded when a table is added to the canvas.
   const queryClient = useQueryClient()
@@ -143,9 +159,7 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
   const calculatedColumnsRef = useRef(calculatedColumns)
   calculatedColumnsRef.current = calculatedColumns
   // Story 11.2: seed past restored ids so new ids never collide (Dev Notes §4).
-  const calcIdCounterRef = useRef(
-    maxSuffixFromIds(initialState.calculatedColumns.map((c) => c.id)),
-  )
+  const calcIdCounterRef = useRef(maxSuffixFromIds(initialState.calculatedColumns.map((c) => c.id)))
 
   // Story 10.5: filters state — mirrors extraStateRef.current.filters for render.
   // filtersRef lets handlers read the latest value without closure staleness.
@@ -240,12 +254,9 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
   )
 
   // AC-1: Open the JoinInspector when the user clicks a join edge.
-  const onEdgeClick = useCallback(
-    (_event: React.MouseEvent, edge: JoinEdgeType) => {
-      setSelectedPanel({ type: 'join', edge })
-    },
-    [],
-  )
+  const onEdgeClick = useCallback((_event: React.MouseEvent, edge: JoinEdgeType) => {
+    setSelectedPanel({ type: 'join', edge })
+  }, [])
 
   // Close the inspector when the user clicks the canvas background.
   const onPaneClick = useCallback(() => {
@@ -267,7 +278,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
       notify(nodes, updatedEdges)
       setSelectedPanel((prev) =>
         prev?.type === 'join' && prev.edge.id === edgeId && prev.edge.data
-          ? { ...prev, edge: { ...prev.edge, data: { ...prev.edge.data, joinType } } }
+          ? {
+              ...prev,
+              edge: { ...prev.edge, data: { ...prev.edge.data, joinType } },
+            }
           : prev,
       )
     },
@@ -364,9 +378,7 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
           ...n,
           data: {
             ...n.data,
-            columns: n.data.columns.map((c) =>
-              c.columnName === columnName ? { ...c, alias } : c,
-            ),
+            columns: n.data.columns.map((c) => (c.columnName === columnName ? { ...c, alias } : c)),
           },
         }
       })
@@ -400,7 +412,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
       }
       const updated = [...caseColumnsRef.current, newCase]
       setCaseColumns(updated)
-      extraStateRef.current = { ...extraStateRef.current, caseColumns: updated }
+      extraStateRef.current = {
+        ...extraStateRef.current,
+        caseColumns: updated,
+      }
       notify(nodesRef.current, edgesRef.current)
       setSelectedPanel({ type: 'case', id: newId })
     },
@@ -412,7 +427,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
     (caseId: string) => {
       const updated = caseColumnsRef.current.filter((c) => c.id !== caseId)
       setCaseColumns(updated)
-      extraStateRef.current = { ...extraStateRef.current, caseColumns: updated }
+      extraStateRef.current = {
+        ...extraStateRef.current,
+        caseColumns: updated,
+      }
       notify(nodesRef.current, edgesRef.current)
       setSelectedPanel((prev) => (prev?.type === 'case' && prev.id === caseId ? null : prev))
     },
@@ -431,7 +449,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
     (updated: CaseColumn) => {
       const updatedAll = caseColumnsRef.current.map((c) => (c.id === updated.id ? updated : c))
       setCaseColumns(updatedAll)
-      extraStateRef.current = { ...extraStateRef.current, caseColumns: updatedAll }
+      extraStateRef.current = {
+        ...extraStateRef.current,
+        caseColumns: updatedAll,
+      }
       notify(nodesRef.current, edgesRef.current)
     },
     [notify],
@@ -450,7 +471,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
       }
       const updated = [...calculatedColumnsRef.current, newCalc]
       setCalculatedColumns(updated)
-      extraStateRef.current = { ...extraStateRef.current, calculatedColumns: updated }
+      extraStateRef.current = {
+        ...extraStateRef.current,
+        calculatedColumns: updated,
+      }
       notify(nodesRef.current, edgesRef.current)
       setSelectedPanel({ type: 'calculated', id: newId })
     },
@@ -462,7 +486,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
     (calcId: string) => {
       const updated = calculatedColumnsRef.current.filter((c) => c.id !== calcId)
       setCalculatedColumns(updated)
-      extraStateRef.current = { ...extraStateRef.current, calculatedColumns: updated }
+      extraStateRef.current = {
+        ...extraStateRef.current,
+        calculatedColumns: updated,
+      }
       notify(nodesRef.current, edgesRef.current)
       setSelectedPanel((prev) => (prev?.type === 'calculated' && prev.id === calcId ? null : prev))
     },
@@ -482,7 +509,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
         c.id === updated.id ? updated : c,
       )
       setCalculatedColumns(updatedAll)
-      extraStateRef.current = { ...extraStateRef.current, calculatedColumns: updatedAll }
+      extraStateRef.current = {
+        ...extraStateRef.current,
+        calculatedColumns: updatedAll,
+      }
       notify(nodesRef.current, edgesRef.current)
     },
     [notify],
@@ -523,9 +553,7 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
     (changes: NodeChange<TableNodeType>[]) => {
       onNodesChange(changes)
 
-      const removedIds = new Set(
-        changes.filter((c) => c.type === 'remove').map((c) => c.id),
-      )
+      const removedIds = new Set(changes.filter((c) => c.type === 'remove').map((c) => c.id))
 
       if (removedIds.size > 0) {
         const survivingEdges = edges.filter(
@@ -535,12 +563,13 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
         const survivingNodes = nodes.filter((n) => !removedIds.has(n.id))
 
         // Cascade CASE column removal (Story 10.3) — extraStateRef MUST be updated before notify().
-        const survivingCaseColumns = caseColumnsRef.current.filter(
-          (c) => !removedIds.has(c.nodeId),
-        )
+        const survivingCaseColumns = caseColumnsRef.current.filter((c) => !removedIds.has(c.nodeId))
         if (survivingCaseColumns.length !== caseColumnsRef.current.length) {
           setCaseColumns(survivingCaseColumns)
-          extraStateRef.current = { ...extraStateRef.current, caseColumns: survivingCaseColumns }
+          extraStateRef.current = {
+            ...extraStateRef.current,
+            caseColumns: survivingCaseColumns,
+          }
         }
 
         // Story 10.4: cascade calculated column removal — same ordering requirement.
@@ -602,9 +631,7 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
     (changes: EdgeChange<JoinEdgeType>[]) => {
       onEdgesChange(changes)
 
-      const removedEdgeIds = new Set(
-        changes.filter((c) => c.type === 'remove').map((c) => c.id),
-      )
+      const removedEdgeIds = new Set(changes.filter((c) => c.type === 'remove').map((c) => c.id))
 
       if (removedEdgeIds.size > 0) {
         const survivingEdges = edges.filter((e) => !removedEdgeIds.has(e.id))
@@ -618,6 +645,32 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
     },
     [onEdgesChange, nodes, edges, notify],
   )
+
+  const handleRequestRemoveNode = useCallback((nodeId: string) => {
+    setPendingRemoveIds([nodeId])
+  }, [])
+
+  // Intercept keyboard deletion: node deletions are held for confirmation; edge-only
+  // deletions go through unchanged.
+  const onBeforeDelete = useCallback(
+    async ({ nodes: toDelete }: { nodes: TableNodeType[]; edges: JoinEdgeType[] }) => {
+      if (confirmedDeleteRef.current) return true
+      if (toDelete.length === 0) return true
+      setPendingRemoveIds(toDelete.map((n) => n.id))
+      return false
+    },
+    [],
+  )
+
+  const handleConfirmRemove = useCallback(() => {
+    const ids = pendingRemoveIds
+    setPendingRemoveIds(null)
+    if (!ids || ids.length === 0) return
+    confirmedDeleteRef.current = true
+    void deleteElements({ nodes: ids.map((id) => ({ id })) }).finally(() => {
+      confirmedDeleteRef.current = false
+    })
+  }, [pendingRemoveIds, deleteElements])
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault()
@@ -640,7 +693,10 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
 
       // Capture the drop position synchronously — the React event is recycled before the
       // async column fetch below resolves, so clientX/Y must be read now.
-      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      const position = screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      })
 
       // The palette ships names + counts only; fetch this table's columns on demand
       // (cached per-table via react-query), then add the node. Reads nodes/edges from refs
@@ -738,61 +794,85 @@ function QueryBuilderCanvasInner({ initialState, onChange }: QueryBuilderCanvasP
           {t('datasets.builder.orderByPanel.openButton')}
         </button>
       </div>
-      <TableSideChangeContext.Provider value={handleSideChange}>
-        <ColumnCheckContext.Provider value={handleColumnCheck}>
-          <ColumnAggregateContext.Provider value={handleAggregateChange}>
-            <ColumnAliasContext.Provider value={handleAliasChange}>
-              <CaseColumnsContext.Provider value={caseColumns}>
-                <AddCaseColumnContext.Provider value={handleAddCaseColumn}>
-                  <DeleteCaseColumnContext.Provider value={handleDeleteCaseColumn}>
-                    <SelectCaseColumnContext.Provider value={handleSelectCaseColumn}>
-                      <CalculatedColumnsContext.Provider value={calculatedColumns}>
-                        <AddCalculatedColumnContext.Provider value={handleAddCalculatedColumn}>
-                          <DeleteCalculatedColumnContext.Provider
-                            value={handleDeleteCalculatedColumn}
-                          >
-                            <SelectCalculatedColumnContext.Provider
-                              value={handleSelectCalculatedColumn}
+      <RemoveNodeContext.Provider value={handleRequestRemoveNode}>
+        <TableSideChangeContext.Provider value={handleSideChange}>
+          <ColumnCheckContext.Provider value={handleColumnCheck}>
+            <ColumnAggregateContext.Provider value={handleAggregateChange}>
+              <ColumnAliasContext.Provider value={handleAliasChange}>
+                <CaseColumnsContext.Provider value={caseColumns}>
+                  <AddCaseColumnContext.Provider value={handleAddCaseColumn}>
+                    <DeleteCaseColumnContext.Provider value={handleDeleteCaseColumn}>
+                      <SelectCaseColumnContext.Provider value={handleSelectCaseColumn}>
+                        <CalculatedColumnsContext.Provider value={calculatedColumns}>
+                          <AddCalculatedColumnContext.Provider value={handleAddCalculatedColumn}>
+                            <DeleteCalculatedColumnContext.Provider
+                              value={handleDeleteCalculatedColumn}
                             >
-                              <ReactFlow
-                                nodes={nodes}
-                                edges={edges}
-                                nodeTypes={nodeTypes}
-                                edgeTypes={edgeTypes}
-                                onNodesChange={handleNodesChange}
-                                onEdgesChange={handleEdgesChange}
-                                onNodeDragStop={onNodeDragStop}
-                                onConnect={onConnect}
-                                isValidConnection={isValidConnection}
-                                onEdgeClick={onEdgeClick}
-                                onPaneClick={onPaneClick}
-                                onDragOver={onDragOver}
-                                onDrop={onDrop}
-                                deleteKeyCode={['Backspace', 'Delete']}
-                                // Loose mode lets a join be drawn between any two column
-                                // handles regardless of which is source/target — without it
-                                // a natural drag (one node's edge to the next) is frequently
-                                // a source→source / target→target pair, which strict mode
-                                // rejects, so the connection line vanished on mouse-up.
-                                connectionMode={ConnectionMode.Loose}
-                                fitView
+                              <SelectCalculatedColumnContext.Provider
+                                value={handleSelectCalculatedColumn}
                               >
-                                <Background />
-                                <Controls />
-                                <MiniMap />
-                              </ReactFlow>
-                            </SelectCalculatedColumnContext.Provider>
-                          </DeleteCalculatedColumnContext.Provider>
-                        </AddCalculatedColumnContext.Provider>
-                      </CalculatedColumnsContext.Provider>
-                    </SelectCaseColumnContext.Provider>
-                  </DeleteCaseColumnContext.Provider>
-                </AddCaseColumnContext.Provider>
-              </CaseColumnsContext.Provider>
-            </ColumnAliasContext.Provider>
-          </ColumnAggregateContext.Provider>
-        </ColumnCheckContext.Provider>
-      </TableSideChangeContext.Provider>
+                                <ReactFlow
+                                  nodes={nodes}
+                                  edges={edges}
+                                  nodeTypes={nodeTypes}
+                                  edgeTypes={edgeTypes}
+                                  onNodesChange={handleNodesChange}
+                                  onEdgesChange={handleEdgesChange}
+                                  onNodeDragStop={onNodeDragStop}
+                                  onConnect={onConnect}
+                                  isValidConnection={isValidConnection}
+                                  onEdgeClick={onEdgeClick}
+                                  onPaneClick={onPaneClick}
+                                  onDragOver={onDragOver}
+                                  onDrop={onDrop}
+                                  deleteKeyCode={['Backspace', 'Delete']}
+                                  onBeforeDelete={onBeforeDelete}
+                                  // Loose mode lets a join be drawn between any two column
+                                  // handles regardless of which is source/target — without it
+                                  // a natural drag (one node's edge to the next) is frequently
+                                  // a source→source / target→target pair, which strict mode
+                                  // rejects, so the connection line vanished on mouse-up.
+                                  connectionMode={ConnectionMode.Loose}
+                                  fitView
+                                >
+                                  <Background />
+                                  <Controls />
+                                  <MiniMap />
+                                </ReactFlow>
+                              </SelectCalculatedColumnContext.Provider>
+                            </DeleteCalculatedColumnContext.Provider>
+                          </AddCalculatedColumnContext.Provider>
+                        </CalculatedColumnsContext.Provider>
+                      </SelectCaseColumnContext.Provider>
+                    </DeleteCaseColumnContext.Provider>
+                  </AddCaseColumnContext.Provider>
+                </CaseColumnsContext.Provider>
+              </ColumnAliasContext.Provider>
+            </ColumnAggregateContext.Provider>
+          </ColumnCheckContext.Provider>
+        </TableSideChangeContext.Provider>
+      </RemoveNodeContext.Provider>
+      <AlertDialog
+        open={pendingRemoveIds !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRemoveIds(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('datasets.builder.node.removeConfirmTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('datasets.builder.node.removeConfirmDescription')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('datasets.builder.node.removeConfirmCancel')}</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmRemove}>
+              {t('datasets.builder.node.removeConfirmAction')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {(leftTableError ||
         columnSelectionError ||
         caseColumnAliasError ||

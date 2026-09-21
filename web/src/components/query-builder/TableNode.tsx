@@ -74,6 +74,10 @@ export const DeleteCalculatedColumnContext = createContext<(calcId: string) => v
 // Story 10.4: canvas provides select-calculated handler (opens CalculatedColumnEditor).
 export const SelectCalculatedColumnContext = createContext<(calcId: string) => void>(() => {})
 
+// Canvas provides a request-removal handler; it asks the user to confirm before the
+// node is actually deleted.
+export const RemoveNodeContext = createContext<(nodeId: string) => void>(() => {})
+
 // Story 9.1: Structural shell. Story 9.5 makes the Left/Right toggle interactive.
 // Story 10.1 makes column checkboxes interactive via ColumnCheckContext.
 // Story 10.2 adds aggregate dropdown + alias input for checked columns.
@@ -85,6 +89,7 @@ export const SelectCalculatedColumnContext = createContext<(calcId: string) => v
 export const TableNode = memo(function TableNode({ id, data, selected }: NodeProps<TableNodeType>) {
   const { t } = useTranslation()
   const onSideChange = useContext(TableSideChangeContext)
+  const onRemoveNode = useContext(RemoveNodeContext)
   const onColumnCheck = useContext(ColumnCheckContext)
   const onColumnAggregate = useContext(ColumnAggregateContext)
   const onColumnAlias = useContext(ColumnAliasContext)
@@ -140,6 +145,14 @@ export const TableNode = memo(function TableNode({ id, data, selected }: NodePro
             {t('datasets.builder.node.right')}
           </button>
         </div>
+        <button
+          type="button"
+          onClick={() => onRemoveNode(id)}
+          aria-label={t('datasets.builder.node.removeTableAria')}
+          className="nodrag nopan ml-2 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-destructive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <X className="h-4 w-4" />
+        </button>
       </div>
 
       {/* Column list — Story 10.1: checkboxes; Story 10.2: aggregate + alias for checked columns */}

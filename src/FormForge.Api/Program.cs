@@ -603,6 +603,28 @@ try
 #pragma warning restore EF1002
     }
 
+    // Backfill for tenants onboarded before TenantOnboardingService granted the preview role
+    // USAGE on the tenant + `{schema}_datasets` schemas: without it Postgres silently skips
+    // those schemas on the preview search_path ("relation ... does not exist"). Idempotent;
+    // no interpolated input (schema names come from public.tenants and go through %I).
+    db.Database.ExecuteSqlRaw("""
+        DO $$
+        DECLARE s text;
+        BEGIN
+          IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'formforge_preview') THEN
+            FOR s IN SELECT schema_name FROM public.tenants WHERE status = 'Active' LOOP
+              IF to_regnamespace(quote_ident(s)) IS NOT NULL THEN
+                EXECUTE format('GRANT USAGE ON SCHEMA %I TO formforge_preview', s);
+              END IF;
+              IF to_regnamespace(quote_ident(s || '_datasets')) IS NOT NULL THEN
+                EXECUTE format('GRANT USAGE ON SCHEMA %I TO formforge_preview', s || '_datasets');
+              END IF;
+            END LOOP;
+          END IF;
+        END
+        $$;
+        """);
+
     // Story 12.4 — bootstrap: create a default platform-super-admin account into
     // public.platform_admins (never into any `users` table — architecture.md §7.4) if
     // none exists yet. Credentials are emitted as a startup warning so the operator can

@@ -1249,6 +1249,8 @@
       "filePendingHint": "Will upload on save",
       "fileChange": "Change",
       "fileRemove": "Remove",
+      "fileDownload": "Download",
+      "fileDownloadFailed": "Could not download the file. Please try again.",
       "fileUploadError": "File upload failed for '{{field}}'. Please try again.",
       "noRowsYet": "No rows yet",
       "dropFieldsToTableHelp": "Drop one or more Field elements into the template to define columns.",

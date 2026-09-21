@@ -2,7 +2,8 @@ import RepeaterRowDrawer from './RepeaterRowDrawer'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileText, ImageOff, Paperclip, Pencil, Trash2, Upload, X } from 'lucide-react'
+import { toast } from 'sonner'
+import { Download, FileText, ImageOff, Paperclip, Pencil, Trash2, Upload, X } from 'lucide-react'
 import { getFieldKey, type DesignerElement } from '@/types/designer'
 import { filesApi } from '@/features/designer/filesApi'
 import { cn } from '@/lib/utils'
@@ -1135,6 +1136,26 @@ function FileFieldRenderer({
     e.target.value = '' // allow re-selecting the same file
   }
 
+  // Only an already-saved file (a stored object key, not a just-picked pending
+  // File) can be downloaded.
+  const canDownload = existingKey !== null && pendingFile === null
+
+  const handleDownload = async () => {
+    if (!existingKey) return
+    try {
+      const { url } = await filesApi.getDownloadUrl(existingKey)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = existingKey.split('/').pop() ?? ''
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    } catch {
+      toast.error(t('designer.renderer.fileDownloadFailed'))
+    }
+  }
+
   const handleRemove = () => {
     if (bindTo !== '') interactiveProps?.onChange(bindTo, undefined)
     if (existingKey) void qc.invalidateQueries({ queryKey: ['files-presign', existingKey] })
@@ -1223,6 +1244,17 @@ function FileFieldRenderer({
               >
                 <Pencil className="h-3.5 w-3.5" />
               </button>
+              {canDownload && (
+                <button
+                  type="button"
+                  title={t('designer.renderer.fileDownload')}
+                  aria-label={t('designer.renderer.fileDownload')}
+                  onClick={() => void handleDownload()}
+                  className="rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                </button>
+              )}
               <button
                 type="button"
                 title={t('designer.renderer.fileRemove')}

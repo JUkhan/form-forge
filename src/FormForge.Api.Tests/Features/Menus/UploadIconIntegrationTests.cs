@@ -240,8 +240,11 @@ public sealed class UploadIconIntegrationTests : IClassFixture<PostgresFixture>,
         // Unused by the icon-upload tests but required by the IIconStorageService
         // contract (the File designer field added these). Pre-existing compile gap
         // unrelated to Story 2.10 — stubbed so the test project builds.
-        public Task<string> GetPresignedUrlAsync(string objectKey, CancellationToken ct) =>
+        public Task<string> GetPresignedUrlAsync(string objectKey, CancellationToken ct, string? downloadFileName = null) =>
             Task.FromResult($"https://fake.local/{objectKey}");
+
+        public Task<bool> ObjectExistsAsync(string objectKey, CancellationToken ct) =>
+            Task.FromResult(true);
 
         public Task UploadFileAsync(Stream content, string objectKey, string contentType, long length, CancellationToken ct) =>
             Task.CompletedTask;

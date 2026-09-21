@@ -6,6 +6,13 @@ export const filesApi = {
       `/api/files/presign?key=${encodeURIComponent(fileKey)}`,
     ),
 
+  // Presigned URL that makes the browser download (Content-Disposition: attachment)
+  // rather than display the object.
+  getDownloadUrl: (fileKey: string) =>
+    httpClient.get<{ url: string }>(
+      `/api/files/presign?key=${encodeURIComponent(fileKey)}&download=true`,
+    ),
+
   uploadFile: ({
     file,
     designerId,

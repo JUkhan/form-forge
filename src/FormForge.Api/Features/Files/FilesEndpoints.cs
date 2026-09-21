@@ -1,4 +1,5 @@
 using FormForge.Api.Features.Menus;
+using FormForge.Api.Features.Tenancy;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace FormForge.Api.Features.Files;
@@ -36,8 +37,28 @@ internal static class FilesEndpoints
 
     private sealed record PresignResponse(string Url);
 
+    // Every object lives under a per-tenant root ("{schemaName}/…") in the shared bucket.
+    // Keys stored in records / Image `src` stay tenant-relative; the root is applied here,
+    // at the backend, so a tenant can never address another tenant's objects. A request with
+    // no tenant claim (legacy token) keeps the old un-rooted layout.
+    private static string TenantKey(ITenantContext tenant, string key) =>
+        string.IsNullOrEmpty(tenant.SchemaName) ? key : $"{tenant.SchemaName}/{key}";
+
+    // Objects saved before tenant roots existed sit at the bucket root. Prefer the tenant
+    // location and fall back to the legacy one only when just that one exists.
+    private static async Task<string> ResolveExistingKeyAsync(
+        ITenantContext tenant, IIconStorageService storage, string key, CancellationToken ct)
+    {
+        var tenantKey = TenantKey(tenant, key);
+        if (tenantKey == key) return key;
+        if (await storage.ObjectExistsAsync(tenantKey, ct).ConfigureAwait(false)) return tenantKey;
+        return await storage.ObjectExistsAsync(key, ct).ConfigureAwait(false) ? key : tenantKey;
+    }
+
     private static async Task<IResult> GetPresignedUrlHandler(
         string? key,
+        bool? download,
+        ITenantContext tenant,
         IIconStorageService storage,
         CancellationToken ct)
     {
@@ -50,7 +71,9 @@ internal static class FilesEndpoints
             return Results.BadRequest(new { code = "INVALID_KEY", messageKey = "files.invalidKey" });
         }
 
-        var url = await storage.GetPresignedUrlAsync(key, ct).ConfigureAwait(false);
+        var physicalKey = await ResolveExistingKeyAsync(tenant, storage, key, ct).ConfigureAwait(false);
+        var fileName = download == true ? key[(key.LastIndexOf('/') + 1)..] : null;
+        var url = await storage.GetPresignedUrlAsync(physicalKey, ct, fileName).ConfigureAwait(false);
         return Results.Ok(new PresignResponse(url));
     }
 
@@ -60,6 +83,7 @@ internal static class FilesEndpoints
 
     private static async Task<IResult> UploadFileHandler(
         HttpContext httpContext,
+        ITenantContext tenant,
         IIconStorageService storage,
         CancellationToken ct)
     {
@@ -100,9 +124,10 @@ internal static class FilesEndpoints
         var objectKey = $"{designerId}/{fieldKey}_{idSegment}.{ext}";
 
         using var stream = file.OpenReadStream();
-        await storage.UploadFileAsync(stream, objectKey, file.ContentType, file.Length, ct)
+        await storage.UploadFileAsync(stream, TenantKey(tenant, objectKey), file.ContentType, file.Length, ct)
             .ConfigureAwait(false);
 
+        // The tenant-relative key is what callers persist; TenantKey() re-applies the root.
         return Results.Ok(new UploadFileResponse(objectKey));
     }
 
@@ -127,6 +152,7 @@ internal static class FilesEndpoints
 
     private static async Task<IResult> DeleteFileHandler(
         string? key,
+        ITenantContext tenant,
         IIconStorageService storage,
         CancellationToken ct)
     {
@@ -139,7 +165,8 @@ internal static class FilesEndpoints
             return Results.BadRequest(new { code = "INVALID_KEY", messageKey = "files.invalidKey" });
         }
 
-        await storage.DeleteFileAsync(key, ct).ConfigureAwait(false);
+        var physicalKey = await ResolveExistingKeyAsync(tenant, storage, key, ct).ConfigureAwait(false);
+        await storage.DeleteFileAsync(physicalKey, ct).ConfigureAwait(false);
         return Results.NoContent();
     }
 }

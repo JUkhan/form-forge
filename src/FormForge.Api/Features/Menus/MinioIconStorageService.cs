@@ -159,17 +159,53 @@ internal sealed class MinioIconStorageService(IConfiguration configuration, ILog
         }
     }
 
-    public async Task<string> GetPresignedUrlAsync(string objectKey, CancellationToken ct)
+    public async Task<string> GetPresignedUrlAsync(string objectKey, CancellationToken ct, string? downloadFileName = null)
     {
         ArgumentNullException.ThrowIfNull(objectKey);
         // Sign with the presign client so the URL host is browser-reachable (see field doc).
         var client = GetPresignClient();
+        var args = new PresignedGetObjectArgs()
+            .WithBucket(BucketName)
+            .WithObject(objectKey)
+            .WithExpiry(3600);
+        if (!string.IsNullOrWhiteSpace(downloadFileName))
+        {
+            // Cross-origin <a download> is ignored by browsers, so ask MinIO to serve the
+            // object as an attachment. Quotes/CR/LF stripped to keep the header well-formed.
+            var safeName = downloadFileName
+                .Replace("\"", string.Empty, StringComparison.Ordinal)
+                .Replace("\r", string.Empty, StringComparison.Ordinal)
+                .Replace("\n", string.Empty, StringComparison.Ordinal);
+            args = args.WithHeaders(new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["response-content-disposition"] = $"attachment; filename=\"{safeName}\"",
+            });
+        }
+
         // PresignedGetObjectAsync is pure HMAC URL construction — no network call, no CT.
-        return await client.PresignedGetObjectAsync(
-            new PresignedGetObjectArgs()
+        return await client.PresignedGetObjectAsync(args).ConfigureAwait(false);
+    }
+
+    public async Task<bool> ObjectExistsAsync(string objectKey, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(objectKey);
+        var client = GetClient();
+        try
+        {
+            await client.StatObjectAsync(new StatObjectArgs()
                 .WithBucket(BucketName)
-                .WithObject(objectKey)
-                .WithExpiry(3600)).ConfigureAwait(false);
+                .WithObject(objectKey),
+                ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Minio.Exceptions.ObjectNotFoundException)
+        {
+            return false;
+        }
+        catch (Minio.Exceptions.BucketNotFoundException)
+        {
+            return false;
+        }
     }
 
     private static string ExtensionToContentType(string ext) => ext switch

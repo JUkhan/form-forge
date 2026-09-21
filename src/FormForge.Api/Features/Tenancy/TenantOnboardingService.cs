@@ -301,6 +301,8 @@ internal sealed partial class TenantOnboardingService(
         DO $$
         BEGIN
           IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'formforge_preview') THEN
+            GRANT USAGE ON SCHEMA "{schemaName}" TO formforge_preview;
+            GRANT USAGE ON SCHEMA "{schemaName}_datasets" TO formforge_preview;
             GRANT SELECT ON ALL TABLES IN SCHEMA "{schemaName}" TO formforge_preview;
           END IF;
         END

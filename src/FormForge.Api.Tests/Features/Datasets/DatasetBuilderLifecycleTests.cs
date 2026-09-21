@@ -129,7 +129,7 @@ public sealed class DatasetBuilderLifecycleTests : IClassFixture<PostgresFixture
         Assert.NotNull(dto);
         Assert.False(dto!.IsCustomQuery);
         Assert.NotNull(dto.Query);
-        Assert.Contains("FROM \"public\".\"blc_probe\"", dto.Query!, StringComparison.Ordinal);
+        Assert.Contains("FROM \"blc_probe\"", dto.Query!, StringComparison.Ordinal);
 
         Assert.True(await ViewExistsAsync("blc_save_ds"));
         var def = await GetViewDefAsync("blc_save_ds");

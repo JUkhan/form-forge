@@ -141,7 +141,9 @@ internal static class DatasetSqlGenerator
 
         // ── Step 4 — FROM clause (left-designated table) ────────────────────────────
         var leftNode = nodes.First(n => n.Data.Side == "left");
-        var from = $"FROM \"public\".{Q(leftNode.Data.TableName)}";
+        // Unqualified: resolved via the connection's search_path, which puts the tenant's own
+        // schema first (a hardcoded "public" would miss tenant Designer-provisioned tables).
+        var from = $"FROM {Q(leftNode.Data.TableName)}";
 
         // ── Step 5 — JOIN clauses ───────────────────────────────────────────────────
         // Build defensively (code-review P2): duplicate or null node ids in a hand-crafted
@@ -166,7 +168,7 @@ internal static class DatasetSqlGenerator
             var sourceTable = sourceNode.Data.TableName;
             var targetTable = targetNode.Data.TableName;
             joins.Add(
-                $"{JoinKeyword(edge.Data.JoinType)} JOIN \"public\".{Q(targetTable)} " +
+                $"{JoinKeyword(edge.Data.JoinType)} JOIN {Q(targetTable)} " +
                 $"ON {Q(sourceTable)}.{Q(edge.SourceHandle)} = {Q(targetTable)}.{Q(edge.TargetHandle)}");
         }
 

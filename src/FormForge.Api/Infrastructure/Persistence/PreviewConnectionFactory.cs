@@ -35,7 +35,12 @@ internal sealed class PreviewConnectionFactory : IPreviewConnectionFactory
     public async Task<NpgsqlConnection> CreateOpenConnectionAsync(CancellationToken ct = default)
     {
         var datasetsSchema = TenantDatasetSchemaResolver.Resolve(_tenantContext);
-        var csb = new NpgsqlConnectionStringBuilder(ConnectionString) { SearchPath = $"{datasetsSchema}, public" };
+        // The tenant's own schema comes first so builder/custom queries over its
+        // Designer-provisioned tables (e.g. `message`) resolve; legacy (no tenant) is unchanged.
+        var searchPath = _tenantContext.SchemaName is { } tenantSchema
+            ? $"{tenantSchema}, {datasetsSchema}, public"
+            : $"{datasetsSchema}, public";
+        var csb = new NpgsqlConnectionStringBuilder(ConnectionString) { SearchPath = searchPath };
         var connection = new NpgsqlConnection(csb.ConnectionString);
         try
         {

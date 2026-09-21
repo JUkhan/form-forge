@@ -158,7 +158,7 @@ public sealed class DatasetSqlGeneratorTests
 
         Assert.False(result.HasErrors);
         Assert.Contains("SELECT \"orders\".\"id\" AS \"orders_id\"", result.ViewSql, StringComparison.Ordinal);
-        Assert.Contains("FROM \"public\".\"orders\"", result.ViewSql, StringComparison.Ordinal);
+        Assert.Contains("FROM \"orders\"", result.ViewSql, StringComparison.Ordinal);
         Assert.DoesNotContain("WHERE", result.ViewSql!, StringComparison.Ordinal);
         Assert.DoesNotContain("ORDER BY", result.ViewSql!, StringComparison.Ordinal);
     }
@@ -232,7 +232,7 @@ public sealed class DatasetSqlGeneratorTests
 
         Assert.False(result.HasErrors);
         Assert.Contains(
-            "INNER JOIN \"public\".\"items\" ON \"orders\".\"id\" = \"items\".\"order_id\"",
+            "INNER JOIN \"items\" ON \"orders\".\"id\" = \"items\".\"order_id\"",
             result.ViewSql, StringComparison.Ordinal);
     }
 

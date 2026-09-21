@@ -125,7 +125,7 @@ public sealed class DatasetBuilderModeTests : IClassFixture<PostgresFixture>, IA
         Assert.False(dto!.IsCustomQuery);
         Assert.NotNull(dto.Query);
         Assert.Contains("SELECT", dto.Query!, StringComparison.Ordinal);
-        Assert.Contains("FROM \"public\".\"builder_probe\"", dto.Query!, StringComparison.Ordinal);
+        Assert.Contains("FROM \"builder_probe\"", dto.Query!, StringComparison.Ordinal);
 
         // The persisted query (GET) must match the server-generated SQL.
         using var getResponse = await GetAsync(token, $"/api/datasets/{created.Id}");
@@ -210,7 +210,7 @@ public sealed class DatasetBuilderModeTests : IClassFixture<PostgresFixture>, IA
         Assert.False(dto!.IsCustomQuery);
         Assert.NotNull(dto.Query);
         Assert.Contains("SELECT", dto.Query!, StringComparison.Ordinal);
-        Assert.Contains("FROM \"public\".\"builder_probe\"", dto.Query!, StringComparison.Ordinal);
+        Assert.Contains("FROM \"builder_probe\"", dto.Query!, StringComparison.Ordinal);
         // The POST response echoes the raw builder_state passed through (not re-read from jsonb).
         Assert.Equal(builderState, dto.BuilderState);
 

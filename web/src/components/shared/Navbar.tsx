@@ -88,9 +88,14 @@ export function Navbar() {
         {/* Brand mark — small icon-tile + wordmark across the top of the
             sidebar. */}
         <div className="flex shrink-0 items-center gap-2 px-4 py-4">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+          <Link
+            to="/"
+            onClick={closeDrawer}
+            aria-label={t('nav.brandName')}
+            className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
+          >
             <LayoutDashboard className="h-4 w-4" />
-          </div>
+          </Link>
           <span className="text-sm font-bold tracking-tight text-sidebar-foreground">
             {tenant?.name ?? t('nav.brandName')}
           </span>
